@@ -1,4 +1,5 @@
 from flask import Flask, jsonify
+from flask import Response
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
@@ -45,6 +46,49 @@ def normalize_text(s):
     # Normalize whitespace
     s = " ".join(s.split())
     return s
+
+
+def parse_price(s):
+    """Parse the raw scraped price string into one of:
+    - integer (euros) if a numeric price is found (rounded to int)
+    - 'Prijs op aanvraag' when that phrase appears
+    - 'Compromis in opmaak' when that phrase appears
+    - empty string when nothing found
+    """
+    if not s:
+        return ""
+    s = normalize_text(s)
+
+    # Special exact phrases
+    if 'Prijs op aanvraag' in s:
+        return 'Prijs op aanvraag'
+    if 'Compromis in opmaak' in s or 'Compromis' in s:
+        # keep the Dutch phrase the user requested
+        return 'Compromis in opmaak'
+
+    # Remove non-digit, non-separator characters but keep euro symbol and common separators
+    # Common forms: "€ 1.234.567", "1.234.567 €", "€1.234.567", "1 234 567€"
+    # Remove euro sign and whitespace, then strip dots and commas
+    cleaned = s.replace('\u20ac', '').replace('€', '')
+    cleaned = cleaned.replace('\xa0', ' ').strip()
+
+    # Remove currency words
+    cleaned = re.sub(r'(?i)eur[o|s]?|euro', '', cleaned)
+
+    # Keep digits and separators
+    cleaned = cleaned.strip()
+    # Replace non-digit separators with nothing
+    cleaned_digits = re.sub(r'[^0-9]', '', cleaned)
+
+    if not cleaned_digits:
+        return ''
+
+    try:
+        value = int(cleaned_digits)
+        # If the original used cents or weird formatting, it's OK — we treat as euros
+        return value
+    except Exception:
+        return ''
 
 @app.route('/api/listings', methods=['GET'])
 def get_listings():
@@ -120,7 +164,7 @@ def get_listings():
                 "listing_id": listing_id,
                 "listing_url": full_url,
                 "photo_url": normalize_text(photo_url),
-                "price": normalize_text(price),
+                "price": parse_price(price) if price else "",
                 "location": normalize_text(location),
                 "description": normalize_text(description)
             }
@@ -137,19 +181,25 @@ def get_listings():
                 seen_ids.add(listing['listing_id'])
                 unique_listings.append(listing)
         
-        return jsonify({
+        # Pretty-print JSON with UTF-8 characters preserved
+        import json
+        payload = {
             "success": True,
             "count": len(unique_listings),
             "listings": unique_listings
-        })
+        }
+        return Response(json.dumps(payload, ensure_ascii=False, indent=2), mimetype='application/json; charset=utf-8')
     
     except Exception as e:
         # Silent fail - return empty list
-        return jsonify({
+        import json
+        payload = {
             "success": False,
             "error": str(e),
             "listings": []
-        }), 200  # Return 200 so Botpress doesn't break
+        }
+        # Return 200 so Botpress doesn't break
+        return Response(json.dumps(payload, ensure_ascii=False, indent=2), mimetype='application/json; charset=utf-8'), 200
 
 @app.route('/health', methods=['GET'])
 def health_check():
