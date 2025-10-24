@@ -3,14 +3,48 @@ from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import re
+import html
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for Botpress calls
+# Ensure Flask returns real UTF-8 characters instead of \uXXXX escapes
+app.config['JSON_AS_ASCII'] = False
 
 def extract_listing_id(url):
     """Extract listing ID from URL like /pand/8718656/..."""
     match = re.search(r'/pand/(\d+)/', url)
     return match.group(1) if match else None
+
+
+def normalize_text(s):
+    """Normalize scraped text:
+    - ensure str
+    - unescape HTML entities (e.g. &euro;)
+    - decode literal backslash unicode escapes (e.g. "\\u00b2") when present
+    - collapse extra whitespace
+    """
+    if s is None:
+        return ""
+    try:
+        s = str(s)
+    except Exception:
+        return s
+
+    # Unescape HTML entities like &nbsp;, &euro;, etc.
+    s = html.unescape(s)
+
+    # If the string contains literal unicode-escape sequences like "\u00b2" or "\x20",
+    # try decoding them. Guard so we don't double-decode already-correct unicode.
+    if "\\u" in s or "\\x" in s:
+        try:
+            s = bytes(s, "utf-8").decode("unicode_escape")
+        except Exception:
+            # If decode fails, leave the string as-is
+            pass
+
+    # Normalize whitespace
+    s = " ".join(s.split())
+    return s
 
 @app.route('/api/listings', methods=['GET'])
 def get_listings():
@@ -32,6 +66,7 @@ def get_listings():
         for link in listing_links:
             # Extract listing URL and ID
             listing_url = link.get('href', '')
+            listing_url = normalize_text(listing_url)
             if not listing_url:
                 continue
                 
@@ -44,7 +79,8 @@ def get_listings():
             
             # Extract all text content from the link
             text_content = link.get_text(separator='|', strip=True)
-            parts = [p.strip() for p in text_content.split('|') if p.strip()]
+            text_content = normalize_text(text_content)
+            parts = [normalize_text(p) for p in text_content.split('|') if p.strip()]
             
             # Initialize variables
             location = ""
@@ -75,6 +111,7 @@ def get_listings():
             img_tag = link.find('img')
             if img_tag:
                 photo_src = img_tag.get('src') or img_tag.get('data-src') or img_tag.get('data-lazy-src')
+                photo_src = normalize_text(photo_src)
                 if photo_src:
                     photo_url = photo_src if photo_src.startswith('http') else f"https://irres.be{photo_src}"
             
@@ -82,10 +119,10 @@ def get_listings():
             listing_data = {
                 "listing_id": listing_id,
                 "listing_url": full_url,
-                "photo_url": photo_url,
-                "price": price,
-                "location": location,
-                "description": description
+                "photo_url": normalize_text(photo_url),
+                "price": normalize_text(price),
+                "location": normalize_text(location),
+                "description": normalize_text(description)
             }
             
             # Only add if we have at least some data
