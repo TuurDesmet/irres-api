@@ -229,9 +229,18 @@ def normalize_url(src):
     # root-relative
     if src.startswith('/'):
         return 'https://irres.be' + src
-    # missing scheme but starts with www or domain
+    # missing scheme but starts with www
     if src.startswith('www.'):
         return 'https://' + src
+    # already absolute
+    if re.match(r'https?://', src, re.I):
+        return src
+    # remove leading ./
+    if src.startswith('./'):
+        src = src[2:]
+    # If it's a relative path like 'uploads_c/...' make it absolute to the site
+    if not re.search(r':', src):
+        return 'https://irres.be/' + src.lstrip('/')
     return src
 
 @app.route('/api/listings', methods=['GET'])
