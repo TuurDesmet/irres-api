@@ -90,6 +90,44 @@ def parse_price(s):
     except Exception:
         return ''
 
+
+def parse_price_numeric(s):
+    """Return numeric price in euros (int) or None if not numeric/special."""
+    if not s:
+        return None
+    s = normalize_text(s)
+    if 'Prijs op aanvraag' in s:
+        return None
+    if 'Compromis in opmaak' in s or 'Compromis' in s:
+        return None
+    cleaned = s.replace('\u20ac', '').replace('€', '')
+    cleaned = cleaned.replace('\xa0', ' ').strip()
+    cleaned = re.sub(r'(?i)eur[o|s]?|euro', '', cleaned)
+    cleaned_digits = re.sub(r'[^0-9]', '', cleaned)
+    if not cleaned_digits:
+        return None
+    try:
+        return int(cleaned_digits)
+    except Exception:
+        return None
+
+
+def format_price(s):
+    """Return a human-friendly price string with € and thousands separators, or special phrases."""
+    if not s:
+        return ''
+    s = normalize_text(s)
+    if 'Prijs op aanvraag' in s:
+        return 'Prijs op aanvraag'
+    if 'Compromis in opmaak' in s or 'Compromis' in s:
+        return 'Compromis in opmaak'
+    num = parse_price_numeric(s)
+    if num is None:
+        return ''
+    # Format using dot as thousands separator (e.g. 1.234.567)
+    formatted = format(num, ',').replace(',', '.')
+    return f'€ {formatted}'
+
 @app.route('/api/listings', methods=['GET'])
 def get_listings():
     """Main endpoint to fetch all listings from irres.be/te-koop"""
@@ -164,7 +202,9 @@ def get_listings():
                 "listing_id": listing_id,
                 "listing_url": full_url,
                 "photo_url": normalize_text(photo_url),
-                "price": parse_price(price) if price else "",
+                # Provide both a formatted price (with €) and a numeric value in euros
+                "price": format_price(price) if price else "",
+                "price_eur": parse_price_numeric(price),
                 "location": normalize_text(location),
                 "description": normalize_text(description)
             }
