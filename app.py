@@ -128,6 +128,71 @@ def format_price(s):
     formatted = format(num, ',').replace(',', '.')
     return f'€ {formatted}'
 
+
+def find_photo_url(link):
+    """Try multiple strategies to extract a usable photo URL from a listing link element."""
+    # 1. Look for <img> tag and common attributes
+    img = link.find('img')
+    if img:
+        for attr in ('src', 'data-src', 'data-lazy-src', 'data-original'):
+            val = img.get(attr)
+            if val:
+                val = normalize_text(val)
+                if val:
+                    return normalize_url(val)
+        # try srcset: pick the largest candidate (last)
+        srcset = img.get('srcset')
+        if srcset:
+            parts = [p.strip().split(' ')[0] for p in srcset.split(',') if p.strip()]
+            if parts:
+                return normalize_url(normalize_text(parts[-1]))
+
+    # 2. <source> tags inside picture
+    source = link.find('source')
+    if source:
+        for attr in ('srcset', 'data-srcset'):
+            val = source.get(attr)
+            if val:
+                parts = [p.strip().split(' ')[0] for p in val.split(',') if p.strip()]
+                if parts:
+                    return normalize_url(normalize_text(parts[-1]))
+
+    # 3. background-image in style attribute
+    style = link.get('style')
+    if style and 'background' in style:
+        m = re.search(r'url\(([^)]+)\)', style)
+        if m:
+            val = m.group(1).strip('"\'')
+            return normalize_url(normalize_text(val))
+
+    # 4. Look for data attributes on the link itself
+    for attr in ('data-src', 'data-image', 'data-bg'):
+        val = link.get(attr)
+        if val:
+            return normalize_url(normalize_text(val))
+
+    return ''
+
+
+def normalize_url(src):
+    """Normalize URLs to absolute https, handle protocol-relative and root-relative URLs."""
+    if not src:
+        return ''
+    src = src.strip()
+    # remove surrounding quotes
+    if (src.startswith('"') and src.endswith('"')) or (src.startswith("'") and src.endswith("'")):
+        src = src[1:-1]
+    # protocol-relative
+    if src.startswith('//'):
+        return 'https:' + src
+    # root-relative
+    if src.startswith('/'):
+        return 'https://irres.be' + src
+    # missing scheme but starts with www or domain
+    if src.startswith('www.'):
+        return 'https://' + src
+    return src
+
 @app.route('/api/listings', methods=['GET'])
 def get_listings():
     """Main endpoint to fetch all listings from irres.be/te-koop"""
@@ -188,23 +253,16 @@ def get_listings():
             if not description and len(parts) > 2:
                 description = parts[-2] if parts[-1] in ['Dwelling', 'Flat', 'Huis', 'Appartement', 'Grond'] else parts[-1]
             
-            # Extract photo URL from image tag inside the link
-            photo_url = ""
-            img_tag = link.find('img')
-            if img_tag:
-                photo_src = img_tag.get('src') or img_tag.get('data-src') or img_tag.get('data-lazy-src')
-                photo_src = normalize_text(photo_src)
-                if photo_src:
-                    photo_url = photo_src if photo_src.startswith('http') else f"https://irres.be{photo_src}"
+            # Extract photo URL using robust helper
+            photo_url = find_photo_url(link)
             
             # Create listing object
             listing_data = {
                 "listing_id": listing_id,
                 "listing_url": full_url,
                 "photo_url": normalize_text(photo_url),
-                # Provide both a formatted price (with €) and a numeric value in euros
+                # Provide a formatted price (with €) or special phrases
                 "price": format_price(price) if price else "",
-                "price_eur": parse_price_numeric(price),
                 "location": normalize_text(location),
                 "description": normalize_text(description)
             }
