@@ -131,86 +131,95 @@ def format_price(s):
 
 def find_photo_url(link):
     """Try multiple strategies to extract a usable photo URL from a listing link element."""
-    def try_val(val):
+    def norm_candidate(val):
         if not val:
             return None
         v = normalize_text(val)
-        return normalize_url(v) if v else None
+        if not v:
+            return None
+        # skip data URIs and tiny svg placeholders
+        if v.lower().startswith('data:image'):
+            return None
+        return normalize_url(v)
 
-    # 1. Search link and its descendants for <img>
+    candidates = []
+
+    # gather from img tags (all descendants)
     for img in link.select('img'):
-        for attr in ('src', 'data-src', 'data-lazy-src', 'data-original'):
-            got = try_val(img.get(attr))
-            if got:
-                return got
-        srcset = img.get('srcset')
+        for attr in ('src', 'data-src', 'data-lazy-src', 'data-original', 'data-srcset'):
+            raw = img.get(attr)
+            if raw:
+                candidates.append(raw)
+        # srcset entries
+        srcset = img.get('srcset') or img.get('data-srcset')
         if srcset:
             parts = [p.strip().split(' ')[0] for p in srcset.split(',') if p.strip()]
-            if parts:
-                got = try_val(parts[-1])
-                if got:
-                    return got
+            candidates.extend(parts)
 
-    # 2. Check <source> tags in descendants
+    # gather from <source> tags
     for source in link.select('source'):
-        for attr in ('srcset', 'data-srcset'):
-            val = source.get(attr)
-            if val:
-                parts = [p.strip().split(' ')[0] for p in val.split(',') if p.strip()]
-                if parts:
-                    got = try_val(parts[-1])
-                    if got:
-                        return got
+        for attr in ('srcset', 'data-srcset', 'src'):
+            raw = source.get(attr)
+            if raw:
+                if attr in ('srcset', 'data-srcset'):
+                    parts = [p.strip().split(' ')[0] for p in raw.split(',') if p.strip()]
+                    candidates.extend(parts)
+                else:
+                    candidates.append(raw)
 
-    # 3. background-image in style on link or descendants
-    def style_search(el):
+    # gather from style attributes in link and descendants
+    def append_style(el):
         style = el.get('style')
-        if style and 'background' in style:
+        if style and 'url(' in style:
             m = re.search(r'url\(([^)]+)\)', style)
             if m:
-                val = m.group(1).strip('"\'')
-                got = try_val(val)
-                if got:
-                    return got
-        return None
+                candidates.append(m.group(1).strip('"\''))
 
-    got = style_search(link)
-    if got:
-        return got
+    append_style(link)
     for desc in link.descendants:
         if hasattr(desc, 'get'):
-            got = style_search(desc)
-            if got:
-                return got
+            append_style(desc)
 
-    # 4. Look for data attributes on link and descendants
-    for attr in ('data-src', 'data-image', 'data-bg', 'data-photo'):
-        val = link.get(attr)
-        got = try_val(val)
-        if got:
-            return got
+    # gather from data attributes on link and descendants
+    for attr in ('data-src', 'data-image', 'data-bg', 'data-photo', 'data-thumb'):
+        raw = link.get(attr)
+        if raw:
+            candidates.append(raw)
     for desc in link.descendants:
         if hasattr(desc, 'get'):
-            for attr in ('data-src', 'data-image', 'data-bg', 'data-photo'):
-                got = try_val(desc.get(attr))
-                if got:
-                    return got
+            for attr in ('data-src', 'data-image', 'data-bg', 'data-photo', 'data-thumb'):
+                raw = desc.get(attr)
+                if raw:
+                    candidates.append(raw)
 
-    # 5. broaden: search parent and siblings for images
+    # broaden: look in parent container
     parent = link.parent
     if parent:
         for img in parent.select('img, source'):
             for attr in ('src', 'data-src', 'data-lazy-src', 'data-original'):
-                got = try_val(img.get(attr))
-                if got:
-                    return got
+                raw = img.get(attr)
+                if raw:
+                    candidates.append(raw)
             srcset = img.get('srcset')
             if srcset:
                 parts = [p.strip().split(' ')[0] for p in srcset.split(',') if p.strip()]
-                if parts:
-                    got = try_val(parts[-1])
-                    if got:
-                        return got
+                candidates.extend(parts)
+
+    # Normalize candidates and filter
+    normed = []
+    for c in candidates:
+        n = norm_candidate(c)
+        if n:
+            normed.append(n)
+
+    # prefer URLs pointing to uploads or with common image extensions
+    for n in normed:
+        if re.search(r'/uploads|uploads_c|/uploads_c/', n, re.I) or re.search(r'\.(jpg|jpeg|png|webp|gif)(?:\?|$)', n, re.I):
+            return n
+
+    # otherwise return first valid normalized candidate
+    if normed:
+        return normed[0]
 
     return ''
 
