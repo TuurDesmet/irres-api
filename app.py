@@ -131,45 +131,86 @@ def format_price(s):
 
 def find_photo_url(link):
     """Try multiple strategies to extract a usable photo URL from a listing link element."""
-    # 1. Look for <img> tag and common attributes
-    img = link.find('img')
-    if img:
+    def try_val(val):
+        if not val:
+            return None
+        v = normalize_text(val)
+        return normalize_url(v) if v else None
+
+    # 1. Search link and its descendants for <img>
+    for img in link.select('img'):
         for attr in ('src', 'data-src', 'data-lazy-src', 'data-original'):
-            val = img.get(attr)
-            if val:
-                val = normalize_text(val)
-                if val:
-                    return normalize_url(val)
-        # try srcset: pick the largest candidate (last)
+            got = try_val(img.get(attr))
+            if got:
+                return got
         srcset = img.get('srcset')
         if srcset:
             parts = [p.strip().split(' ')[0] for p in srcset.split(',') if p.strip()]
             if parts:
-                return normalize_url(normalize_text(parts[-1]))
+                got = try_val(parts[-1])
+                if got:
+                    return got
 
-    # 2. <source> tags inside picture
-    source = link.find('source')
-    if source:
+    # 2. Check <source> tags in descendants
+    for source in link.select('source'):
         for attr in ('srcset', 'data-srcset'):
             val = source.get(attr)
             if val:
                 parts = [p.strip().split(' ')[0] for p in val.split(',') if p.strip()]
                 if parts:
-                    return normalize_url(normalize_text(parts[-1]))
+                    got = try_val(parts[-1])
+                    if got:
+                        return got
 
-    # 3. background-image in style attribute
-    style = link.get('style')
-    if style and 'background' in style:
-        m = re.search(r'url\(([^)]+)\)', style)
-        if m:
-            val = m.group(1).strip('"\'')
-            return normalize_url(normalize_text(val))
+    # 3. background-image in style on link or descendants
+    def style_search(el):
+        style = el.get('style')
+        if style and 'background' in style:
+            m = re.search(r'url\(([^)]+)\)', style)
+            if m:
+                val = m.group(1).strip('"\'')
+                got = try_val(val)
+                if got:
+                    return got
+        return None
 
-    # 4. Look for data attributes on the link itself
-    for attr in ('data-src', 'data-image', 'data-bg'):
+    got = style_search(link)
+    if got:
+        return got
+    for desc in link.descendants:
+        if hasattr(desc, 'get'):
+            got = style_search(desc)
+            if got:
+                return got
+
+    # 4. Look for data attributes on link and descendants
+    for attr in ('data-src', 'data-image', 'data-bg', 'data-photo'):
         val = link.get(attr)
-        if val:
-            return normalize_url(normalize_text(val))
+        got = try_val(val)
+        if got:
+            return got
+    for desc in link.descendants:
+        if hasattr(desc, 'get'):
+            for attr in ('data-src', 'data-image', 'data-bg', 'data-photo'):
+                got = try_val(desc.get(attr))
+                if got:
+                    return got
+
+    # 5. broaden: search parent and siblings for images
+    parent = link.parent
+    if parent:
+        for img in parent.select('img, source'):
+            for attr in ('src', 'data-src', 'data-lazy-src', 'data-original'):
+                got = try_val(img.get(attr))
+                if got:
+                    return got
+            srcset = img.get('srcset')
+            if srcset:
+                parts = [p.strip().split(' ')[0] for p in srcset.split(',') if p.strip()]
+                if parts:
+                    got = try_val(parts[-1])
+                    if got:
+                        return got
 
     return ''
 
@@ -237,16 +278,19 @@ def get_listings():
             # Parse the parts
             # Typically structure is: Location | Location | Price | Description | Type
             for part in parts:
-                if '€' in part or 'Prijs op aanvraag' in part:
+                # Treat explicit price indicators and placeholders as price
+                if '€' in part or 'Prijs op aanvraag' in part or 'Compromis' in part:
                     price = part
-                elif part in ['Dwelling', 'Flat', 'Huis', 'Appartement', 'Grond']:
+                    continue
+                if part in ['Dwelling', 'Flat', 'Huis', 'Appartement', 'Grond']:
                     # Skip property type indicators
                     continue
-                elif not location:
+                if not location:
                     # First non-price part is usually location
                     location = part
-                elif not description and part != location:
-                    # Next part is description
+                    continue
+                # Next non-price non-location part is description
+                if not description and part != location:
                     description = part
             
             # If description is still empty, use the last meaningful part
