@@ -16,6 +16,14 @@ def extract_listing_id(url):
     match = re.search(r'/pand/(\d+)/', url)
     return match.group(1) if match else None
 
+def map_listing_type(english_type):
+    """Map English listing types to Dutch"""
+    type_mapping = {
+        'Dwelling': 'Huis',
+        'Flat': 'Appartement',
+        'Land': 'Grond'
+    }
+    return type_mapping.get(english_type, english_type)
 
 def normalize_text(s):
     """Normalize scraped text:
@@ -292,6 +300,7 @@ def get_listings():
             location = ""
             price = ""
             description = ""
+            listing_type = ""
             
             # Parse the parts
             # Typically structure is: Location | Location | Price | Description | Type
@@ -300,8 +309,9 @@ def get_listings():
                 if '€' in part or 'Prijs op aanvraag' in part or 'Compromis' in part:
                     price = part
                     continue
-                if part in ['Dwelling', 'Flat', 'Huis', 'Appartement', 'Grond']:
-                    # Skip property type indicators
+                if part in ['Dwelling', 'Flat', 'Huis', 'Appartement', 'Grond', 'Land']:
+                    # Property type - map to Dutch
+                    listing_type = map_listing_type(part)
                     continue
                 if not location:
                     # First non-price part is usually location
@@ -313,7 +323,11 @@ def get_listings():
             
             # If description is still empty, use the last meaningful part
             if not description and len(parts) > 2:
-                description = parts[-2] if parts[-1] in ['Dwelling', 'Flat', 'Huis', 'Appartement', 'Grond'] else parts[-1]
+                # Check if last part is a type, if so use second to last
+                if parts[-1] in ['Dwelling', 'Flat', 'Huis', 'Appartement', 'Grond', 'Land']:
+                    description = parts[-2] if len(parts) > 1 else ""
+                else:
+                    description = parts[-1]
             
             # Extract photo URL using robust helper
             photo_url = find_photo_url(link)
@@ -326,7 +340,8 @@ def get_listings():
                 # Provide a formatted price (with €) or special phrases
                 "price": format_price(price) if price else "",
                 "location": normalize_text(location),
-                "description": normalize_text(description)
+                "description": normalize_text(description),
+                "listing_type": normalize_text(listing_type)
             }
             
             # Only add if we have at least some data
