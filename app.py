@@ -5,6 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import html
+import time
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for Botpress calls
@@ -270,7 +271,7 @@ def extract_contact_info(listing_url):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
-        response = requests.get(listing_url, headers=headers, timeout=10)
+        response = requests.get(listing_url, headers=headers, timeout=5)
         soup = BeautifulSoup(response.content, 'html.parser')
         
         first_name = ""
@@ -316,6 +317,7 @@ def extract_contact_info(listing_url):
         
     except Exception as e:
         # If we can't fetch the detail page, return empty strings
+        print(f"Error fetching contact info for {listing_url}: {str(e)}")
         return "", ""
 
 
@@ -392,6 +394,8 @@ def get_listings():
             photo_url = find_photo_url(link)
             
             # Extract contact information from the listing detail page
+            # Add small delay to avoid overwhelming the server
+            time.sleep(0.1)
             first_name, email_address = extract_contact_info(full_url)
             
             # Format the price for display
@@ -467,3 +471,21 @@ def root():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
+
+# Example JSON output for a single listing:
+"""
+{
+  "listing_id": "8749906",
+  "listing_url": "https://irres.be/pand/8749906/modern-gerenoveerde-woning-met-open-leefverdieping-en-terras",
+  "photo_url": "https://irres.be/uploads_c/siteassets/Panden/8749906/image_01_abc123.jpg",
+  "price": "€ 495.000",
+  "location": "9000 Gent",
+  "description": "Modern gerenoveerde woning met open leefverdieping en terras",
+  "listing_type": "Huis",
+  "Title": "9000 Gent⎢€ 495.000",
+  "Button1_Label": "Bekijk het op onze website",
+  "Button2_Label": "Contacteer Kasper - Irres",
+  "Button2_email": "mailto:kasper@irres.be"
+}
+"""
