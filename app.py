@@ -56,7 +56,6 @@ def format_price(s):
     return ''
 
 def find_photo_url(link):
-    """Try main page photo first"""
     candidates = []
     for img in link.select('img'):
         for attr in ('src','data-src','data-lazy-src','data-original','data-srcset'):
@@ -72,26 +71,33 @@ def find_photo_url(link):
             return c
     return ''
 
-def find_fallback_image(soup):
-    """Find first valid landscape property photo, skipping blacklisted or duplicates"""
+def find_fallback_image_from_detail(soup):
+    """
+    Extract fallback image from the detail page using the same logic
+    as property details: look for <li> containers or <img> inside main container
+    """
+    # Look inside 'div.estate-images' or all <img> in detail page
     candidates = []
     seen = set()
-    for img in soup.find_all('img'):
-        for attr in ('src','data-src','data-lazy-src','data-original','data-srcset'):
-            raw = img.get(attr)
-            if not raw: continue
-            urls = [raw]
-            if attr in ('srcset','data-srcset'):
-                urls = [p.strip().split()[0] for p in raw.split(',')]
-            for url in urls:
-                norm = normalize_url(url)
-                if not norm: continue
-                if norm in BLACKLIST_IMAGES: continue
-                if norm in seen: continue
-                seen.add(norm)
-                # prefer uploads_c / siteassets
-                if re.search(r'/uploads|uploads_c|siteassets', norm, re.I):
-                    candidates.append(norm)
+    container = soup.select_one('div.estate-images') or soup  # main container
+    if container:
+        for img in container.find_all('img'):
+            src_attrs = ['src','data-src','data-lazy-src','data-original','data-srcset']
+            for attr in src_attrs:
+                val = img.get(attr)
+                if not val: continue
+                urls = [val]
+                if attr in ('srcset','data-srcset'):
+                    urls = [p.strip().split()[0] for p in val.split(',')]
+                for url in urls:
+                    norm = normalize_url(url)
+                    if not norm: continue
+                    if norm.lower() in [b.lower() for b in BLACKLIST_IMAGES]: continue
+                    if norm in seen: continue
+                    seen.add(norm)
+                    # Prefer property images from uploads_c or siteassets
+                    if re.search(r'/uploads|uploads_c|siteassets', norm, re.I):
+                        candidates.append(norm)
     return candidates[0] if candidates else ''
 
 def extract_property_details(soup):
@@ -129,9 +135,8 @@ def extract_contact_and_details(listing_url):
         soup = BeautifulSoup(r.content,'html.parser')
         first_name = ""
         email_address = ""
-        fallback_image = find_fallback_image(soup)
+        fallback_image = find_fallback_image_from_detail(soup)
         property_details = extract_property_details(soup)
-        # Contact info
         footer = soup.find('form', class_='estate-footer')
         if footer:
             name_p = footer.find('p', class_='font-bold')
@@ -170,8 +175,8 @@ def get_listings():
             photo_url = find_photo_url(link)
             time.sleep(0.1)
             first_name,email_address,fallback_image,property_details = extract_contact_and_details(full_url)
-            # FIX: use fallback if main photo missing or blacklisted
-            if not photo_url or photo_url in BLACKLIST_IMAGES:
+            # Use fallback if main photo missing or blacklisted
+            if not photo_url or photo_url.lower() in [b.lower() for b in BLACKLIST_IMAGES]:
                 if fallback_image: photo_url=fallback_image
             formatted_price = format_price(price) if price else ""
             title = f"{location}⎢{formatted_price}" if location or formatted_price else ""
@@ -190,7 +195,6 @@ def get_listings():
                 "details": property_details
             }
             if location or price or description: listings.append(listing_data)
-        # remove duplicates
         seen = set()
         unique=[]
         for l in listings:
@@ -209,7 +213,7 @@ def health_check():
 def root():
     return jsonify({
         "api":"IRRES.be Listings Scraper",
-        "version":"3.2",
+        "version":"3.4",
         "endpoints":{
             "/api/listings":"Get all property listings with contact info and property details",
             "/health":"Health check"
