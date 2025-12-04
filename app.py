@@ -434,10 +434,8 @@ def get_listings():
                 continue
 
             listing_id_num = extract_listing_id_from_url(listing_url)
-            # build listing_id as "<id>-<LocationSafe>" to match example (e.g. 8810159-Deurle)
-            location_for_id = parsed['location'].split()[0] if parsed['location'] else ""
-            location_for_id = re.sub(r'[^A-Za-z0-9\-]', '', location_for_id)
-            listing_id = f"{listing_id_num}-{location_for_id}" if listing_id_num else listing_url
+            # preliminary parsed_location (may be updated from title later)
+            parsed_location = parsed.get('location') or parsed.get('Location') or ""
 
             # listing_type mapping
             lt = parsed['listing_type'] or ""
@@ -501,8 +499,22 @@ def get_listings():
 
             # Title: "{Location}⎥{Price}"
             title = ""
-            if parsed['location'] or price_formatted:
-                title = f"{parsed['location']}⎥{price_formatted}" if parsed['location'] and price_formatted else (parsed['location'] or price_formatted)
+            # prefer parsed_location for consistency
+            if parsed_location or price_formatted:
+                title = f"{parsed_location}⎥{price_formatted}" if parsed_location and price_formatted else (parsed_location or price_formatted)
+
+            # If parsed_location is empty but title contains a location before the separator,
+            # extract it and use that as parsed_location. This ensures 'location' is populated
+            # even when the card markup hides the city inside nested elements.
+            if (not parsed_location) and title and '⎥' in title:
+                possible_loc = title.split('⎥', 1)[0].strip()
+                if possible_loc and not re.search(r'€', possible_loc):
+                    parsed_location = normalize_text(possible_loc)
+
+            # Now build listing_id using the finalized parsed_location
+            location_for_id = parsed_location.split()[0] if parsed_location else ""
+            location_for_id = re.sub(r'[^A-Za-z0-9\-]', '', location_for_id)
+            listing_id = f"{listing_id_num}-{location_for_id}" if listing_id_num else listing_url
 
             # Button1_Label always fixed
             button1 = "Bekijk het op onze website"
@@ -519,8 +531,9 @@ def get_listings():
                 "listing_url": listing_url,
                 "photo_url": photo_url,
                 "price": price_formatted,
-                "location": parsed['location'],
-                "description": parsed['description'],
+                # use the normalized parsed_location computed earlier to avoid discrepancies
+                "location": parsed_location,
+                "description": parsed.get('description') or "",
                 "listing_type": lt_mapped,
                 "title": title,
                 "Button1_Label": button1,
@@ -543,7 +556,7 @@ def get_listings():
             }
 
             # Add listing only if it has some sensible content (avoid empty junk)
-            if listing_obj.get("Location") or listing_obj.get("price") or listing_obj.get("description"):
+            if listing_obj.get("location") or listing_obj.get("price") or listing_obj.get("description"):
                 listings.append(listing_obj)
 
         # deduplicate by listing_id
@@ -587,4 +600,3 @@ def root():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-
