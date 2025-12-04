@@ -115,17 +115,26 @@ def parse_main_listing_card(link):
     if href and not href.startswith('http'):
         href = normalize_url(href)
 
+    # Extract location from h2 with class "estate-city" and data-value attribute
+    location = ""
+    city_h2 = link.find('h2', class_=re.compile(r'estate-city'))
+    if city_h2:
+        # Try data-value first
+        location = city_h2.get('data-value', '').strip()
+        # If not available, get text content
+        if not location:
+            location = normalize_text(city_h2.get_text())
+
     # text parts inside the link
     text = link.get_text(separator="|", strip=True)
     text = normalize_text(text)
     parts = [p for p in [normalize_text(x) for x in text.split("|")] if p]
 
-    location = ""
     price = ""
     description = ""
     listing_type = ""
 
-    # heuristic parsing:
+    # heuristic parsing for price, type, description:
     for p in parts:
         # price candidate
         if '€' in p or re.search(r'Prijs op aanvraag', p, re.I) or re.search(r'Compromis', p, re.I):
@@ -136,11 +145,7 @@ def parse_main_listing_card(link):
             # map if needed
             listing_type = TYPE_MAPPING.get(p, TYPE_MAPPING.get(p.lower(), p))
             continue
-        # first non-price non-type => location if location empty
-        if not location:
-            location = p
-            continue
-        # next non-price non-location => description
+        # first non-price non-type and not location => description if description empty
         if not description and p != location and p != listing_type:
             description = p
 
@@ -148,7 +153,7 @@ def parse_main_listing_card(link):
     if not description and len(parts) >= 2:
         # pick last part if not type
         possible = parts[-1]
-        if possible not in TYPE_MAPPING and not re.search(r'€', possible):
+        if possible not in TYPE_MAPPING and not re.search(r'€', possible) and possible != location:
             description = possible
 
     # try to find photo on the card (img, source, style)
