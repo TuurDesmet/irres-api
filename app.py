@@ -498,16 +498,16 @@ def get_listings():
             lt_mapped = TYPE_MAPPING.get(lt_mapped, TYPE_MAPPING.get(lt, lt_mapped))
 
             # Title: "{Location}⎥{Price}"
-            title = ""
+            Title = ""
             # prefer parsed_location for consistency
             if parsed_location or price_formatted:
-                title = f"{parsed_location}⎥{price_formatted}" if parsed_location and price_formatted else (parsed_location or price_formatted)
+                Title = f"{parsed_location}⎥{price_formatted}" if parsed_location and price_formatted else (parsed_location or price_formatted)
 
-            # If parsed_location is empty but title contains a location before the separator,
+            # If parsed_location is empty but Title contains a location before the separator,
             # extract it and use that as parsed_location. This ensures 'location' is populated
             # even when the card markup hides the city inside nested elements.
-            if (not parsed_location) and title and '⎥' in title:
-                possible_loc = title.split('⎥', 1)[0].strip()
+            if (not parsed_location) and Title and '⎥' in Title:
+                possible_loc = Title.split('⎥', 1)[0].strip()
                 if possible_loc and not re.search(r'€', possible_loc):
                     parsed_location = normalize_text(possible_loc)
 
@@ -535,7 +535,7 @@ def get_listings():
                 "location": parsed_location,
                 "description": parsed.get('description') or "",
                 "listing_type": lt_mapped,
-                "title": title,
+                "Title": Title,
                 "Button1_Label": button1,
                 "Button2_Label": button2_label,
                 "Button2_email": button2_email,
