@@ -140,8 +140,8 @@ def parse_main_listing_card(link):
         if not location:
             location = p
             continue
-        # next non-price => description
-        if not description and p != location:
+        # next non-price non-location => description
+        if not description and p != location and p != listing_type:
             description = p
 
     # final fallback for description
@@ -400,9 +400,9 @@ def get_listings():
 
         soup = BeautifulSoup(resp.content, 'html.parser')
 
-        # find all anchors linking to /pand/<id> - unique
+        # find all anchors linking to /pand/<id> with actual text content
         anchors = soup.find_all('a', href=re.compile(r'/pand/\d+/', re.I))
-        # deduplicate by href
+        # deduplicate by href and filter for anchors with text content
         seen = set()
         listing_links = []
         for a in anchors:
@@ -412,6 +412,10 @@ def get_listings():
             # full url normalization
             full = normalize_url(href) if not href.startswith('http') else href
             if full in seen:
+                continue
+            # only include anchors that have text content (listing cards have text)
+            text = a.get_text(separator="|", strip=True)
+            if not text or not text.strip():
                 continue
             seen.add(full)
             listing_links.append(a)
@@ -491,7 +495,9 @@ def get_listings():
             lt_mapped = TYPE_MAPPING.get(lt_mapped, TYPE_MAPPING.get(lt, lt_mapped))
 
             # Title: "{Location}⎥{Price}"
-            title = f"{parsed['location']}⎥{price_formatted}" if parsed['location'] or price_formatted else ""
+            title = ""
+            if parsed['location'] or price_formatted:
+                title = f"{parsed['location']}⎥{price_formatted}" if parsed['location'] and price_formatted else (parsed['location'] or price_formatted)
 
             # Button1_Label always fixed
             button1 = "Bekijk het op onze website"
