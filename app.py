@@ -519,7 +519,6 @@ def get_listings():
                 "listing_url": listing_url,
                 "photo_url": photo_url,
                 "price": price_formatted,
-                "Location": parsed['location'],
                 "location": parsed['location'],
                 "description": parsed['description'],
                 "listing_type": lt_mapped,
@@ -588,3 +587,4 @@ def root():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
