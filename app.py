@@ -115,6 +115,10 @@ def parse_main_listing_card(link):
     if href and not href.startswith('http'):
         href = normalize_url(href)
 
+    # extract anchor 'name' attribute if present (site's listing id e.g. "8804368-Kruisem")
+    anchor_name = link.get('name') or link.get('data-name') or ""
+    anchor_name = normalize_text(anchor_name)
+
     # Extract location from h2 with class "estate-city" and data-value attribute
     location = ""
     city_h2 = link.find('h2', class_=re.compile(r'estate-city'))
@@ -165,7 +169,8 @@ def parse_main_listing_card(link):
         "price_raw": price,
         "description": description,
         "listing_type": listing_type,
-        "photo_candidate": photo_url
+        "photo_candidate": photo_url,
+        "anchor_name": anchor_name
     }
 
 
@@ -511,10 +516,15 @@ def get_listings():
                 if possible_loc and not re.search(r'€', possible_loc):
                     parsed_location = normalize_text(possible_loc)
 
-            # Now build listing_id using the finalized parsed_location
-            location_for_id = parsed_location.split()[0] if parsed_location else ""
-            location_for_id = re.sub(r'[^A-Za-z0-9\-]', '', location_for_id)
-            listing_id = f"{listing_id_num}-{location_for_id}" if listing_id_num else listing_url
+            # Prefer the site's own listing identifier (anchor 'name') when available
+            anchor_name = parsed.get('anchor_name') or ""
+            if anchor_name:
+                listing_id = anchor_name
+            else:
+                # Now build listing_id using the finalized parsed_location
+                location_for_id = parsed_location.split()[0] if parsed_location else ""
+                location_for_id = re.sub(r'[^A-Za-z0-9\-]', '', location_for_id)
+                listing_id = f"{listing_id_num}-{location_for_id}" if listing_id_num else listing_url
 
             # Button1_Label always fixed
             button1 = "Bekijk het op onze website"
@@ -523,7 +533,7 @@ def get_listings():
             # 1. Button3_Label: if price is "Prijs op aanvraag" -> "Vraag prijs aan" else ""
             # 2. Button3_Field: if price is "Prijs op aanvraag" then equal to Button2_email else ""
             button3_label = "Vraag prijs aan" if price_formatted == "Prijs op aanvraag" else ""
-            button3_field = button2_email if price_formatted == "Prijs op aanvraag" else ""
+            button3_value = f"{button2_email}?subject=Prijs aanvraag {listing_id}" if price_formatted == "Prijs op aanvraag" else ""
 
             # Build the object in the exact structure requested
             listing_obj = {
@@ -541,7 +551,7 @@ def get_listings():
                 "Button2_email": button2_email,
                 # Button3 requested in initial spec: Button3_Label and Button3_Field (you also requested Button3 earlier)
                 "Button3_Label": button3_label,
-                "Button3_Field": button3_field,
+                "Button3_Value": button3_value,
                 "details": {
                     "Terrein_oppervlakte": details.get("Terrein_oppervlakte", ""),
                     "Bewoonbare_oppervlakte": details.get("Bewoonbare_oppervlakte", ""),
