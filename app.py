@@ -59,10 +59,14 @@ def normalize_text(s):
     return s.strip()
 
 
-def normalize_url(src):
+def normalize_url(src, add_tracking=False):
     """
     Make URL absolute for the IRRES.be site.
     Handles protocol-relative, root-relative, and relative paths.
+    
+    Args:
+        src: Source URL to normalize
+        add_tracking: If True, adds ?origin=habichat to listing URLs
     """
     if not src:
         return ""
@@ -70,19 +74,25 @@ def normalize_url(src):
     src = src.strip().strip('\'"')
     
     if src.startswith("//"):
-        return "https:" + src
-    if src.startswith("/"):
-        return "https://irres.be" + src
-    if re.match(r'https?://', src, re.I):
-        return src
-    if src.startswith("www."):
-        return "https://" + src
+        url = "https:" + src
+    elif src.startswith("/"):
+        url = "https://irres.be" + src
+    elif re.match(r'https?://', src, re.I):
+        url = src
+    elif src.startswith("www."):
+        url = "https://" + src
+    elif not re.search(r':', src):
+        # Relative path like "uploads_c/..."
+        url = "https://irres.be/" + src.lstrip('/')
+    else:
+        url = src
     
-    # Relative path like "uploads_c/..."
-    if not re.search(r':', src):
-        return "https://irres.be/" + src.lstrip('/')
+    # Add tracking parameter to listing URLs only
+    if add_tracking and '/pand/' in url:
+        separator = '&' if '?' in url else '?'
+        url = f"{url}{separator}origin=habichat"
     
-    return src
+    return url
 
 
 def extract_listing_id_from_url(url):
@@ -141,7 +151,12 @@ def parse_main_listing_card(link):
     href = link.get('href') or ""
     href = normalize_text(href)
     if href and not href.startswith('http'):
-        href = normalize_url(href)
+        href = normalize_url(href, add_tracking=True)  # Add tracking parameter
+    elif href.startswith('http'):
+        # Already absolute, add tracking if it's a listing URL
+        if '/pand/' in href:
+            separator = '&' if '?' in href else '?'
+            href = f"{href}{separator}origin=habichat"
 
     # Get site's listing ID from anchor name attribute
     anchor_name = link.get('name') or link.get('data-name') or ""
@@ -477,7 +492,12 @@ def get_listings():
                 continue
             
             # Normalize URL
-            full = normalize_url(href) if not href.startswith('http') else href
+            full = normalize_url(href, add_tracking=True) if not href.startswith('http') else href
+            # Add tracking to absolute URLs too
+            if full.startswith('http') and '/pand/' in full:
+                separator = '&' if '?' in full else '?'
+                full = f"{full}{separator}origin=habichat"
+            
             if full in seen:
                 continue
             
