@@ -142,6 +142,23 @@ def format_price_string(raw):
         return s
 
 
+def format_details_as_string(details_dict):
+    """
+    Convert details dictionary to semicolon-separated string format.
+    Example: "Terrein_oppervlakte: 8073 m²; Bewoonbare_oppervlakte: 264 m²; ..."
+    Only includes fields that have non-empty values.
+    """
+    if not details_dict:
+        return ""
+    
+    parts = []
+    for key, value in details_dict.items():
+        if value and str(value).strip():
+            parts.append(f"{key}: {value}")
+    
+    return "; ".join(parts)
+
+
 def parse_main_listing_card(link):
     """
     Parse a listing card from the main /te-koop page.
@@ -610,6 +627,9 @@ def get_listings():
             button3_label = "Vraag prijs aan" if price_formatted == "Prijs op aanvraag" else ""
             button3_value = f"{button2_email}?subject=Prijs aanvraag {listing_id}" if price_formatted == "Prijs op aanvraag" else ""
 
+            # Convert details dictionary to semicolon-separated string
+            details_string = format_details_as_string(details)
+
             # Build listing object
             listing_obj = {
                 "listing_id": listing_id,
@@ -625,18 +645,7 @@ def get_listings():
                 "Button2_email": button2_email,
                 "Button3_Label": button3_label,
                 "Button3_Value": button3_value,
-                "details": {
-                    "Terrein_oppervlakte": details.get("Terrein_oppervlakte", ""),
-                    "Bewoonbare_oppervlakte": details.get("Bewoonbare_oppervlakte", ""),
-                    "Terras_oppervlakte": details.get("Terras_oppervlakte", ""),
-                    "Orientatie": details.get("Orientatie", ""),
-                    "Slaapkamers": details.get("Slaapkamers", ""),
-                    "Badkamers": details.get("Badkamers", ""),
-                    "Bouwjaar": details.get("Bouwjaar", ""),
-                    "Renovatiejaar": details.get("Renovatiejaar", ""),
-                    "EPC": details.get("EPC", ""),
-                    "Beschikbaarheid": details.get("Beschikbaarheid", "")
-                }
+                "details": details_string
             }
 
             # Only add listing if it has meaningful content
@@ -699,4 +708,3 @@ def root():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-
