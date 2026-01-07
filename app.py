@@ -350,6 +350,7 @@ def extract_property_details_from_detail_soup(soup):
     details = {
         "Terrein_oppervlakte": "",
         "Bewoonbare_oppervlakte": "",
+        "Terras_oppervlakte": "",
         "Orientatie": "",
         "Slaapkamers": "",
         "Badkamers": "",
@@ -358,6 +359,7 @@ def extract_property_details_from_detail_soup(soup):
         "EPC": "",
         "Beschikbaarheid": ""
     }
+
 
     try:
         # Find all <li> elements with data-value attribute
@@ -376,6 +378,8 @@ def extract_property_details_from_detail_soup(soup):
             key_lower = key.lower()
             if 'terrein' in key_lower:
                 details["Terrein_oppervlakte"] = value
+            elif 'terras' in key_lower:
+                details["Terras_oppervlakte"] = value
             elif 'bewoonbare' in key_lower:
                 details["Bewoonbare_oppervlakte"] = value
             elif 'ori' in key_lower:
@@ -538,6 +542,7 @@ def get_listings():
             details = {
                 "Terrein_oppervlakte": "",
                 "Bewoonbare_oppervlakte": "",
+                "Terras_oppervlakte": "",
                 "Orientatie": "",
                 "Slaapkamers": "",
                 "Badkamers": "",
@@ -546,6 +551,7 @@ def get_listings():
                 "EPC": "",
                 "Beschikbaarheid": ""
             }
+
             
             if detail_soup:
                 # Extract contact information
@@ -622,6 +628,7 @@ def get_listings():
                 "details": {
                     "Terrein_oppervlakte": details.get("Terrein_oppervlakte", ""),
                     "Bewoonbare_oppervlakte": details.get("Bewoonbare_oppervlakte", ""),
+                    "Terras_oppervlakte": details.get("Terras_oppervlakte", ""),
                     "Orientatie": details.get("Orientatie", ""),
                     "Slaapkamers": details.get("Slaapkamers", ""),
                     "Badkamers": details.get("Badkamers", ""),
@@ -692,3 +699,4 @@ def root():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
