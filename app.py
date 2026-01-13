@@ -1,8 +1,10 @@
+# ===== Irres-API (Unified) ======
 # app.py
-# IRRES.be Listings Scraper API
-# UTF-8 encoded. Returns JSON with real UTF-8 characters (m² etc).
+# IRRES.be Scraper API
+# Combines Listings, Locations, and Office Image scraping in one application.
 
-from flask import Flask, jsonify, Response
+import os
+from flask import Flask, jsonify, Response, request
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
@@ -10,12 +12,23 @@ import re
 import html
 import time
 import json
+import logging
+import unicodedata
+from datetime import datetime
 
+# Initialize Flask App
 app = Flask(__name__)
 CORS(app)
 app.config['JSON_AS_ASCII'] = False  # Ensure UTF-8 characters in JSON
 
-# ==================== CONFIGURATION ====================
+# ==================== CONFIGURATION & LOGGING ====================
+
+# Configure logging (merged from both projects)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -30,7 +43,195 @@ TYPE_MAPPING = {
     'land': 'Grond'
 }
 
-# ==================== HELPER FUNCTIONS ====================
+# ==============================================================================
+# SECTION 1: LOCATION & OFFICE SCRAPER CLASSES (From original scraper.py)
+# ==============================================================================
+
+class IRRESLocationScraper:
+    """
+    Scraper for extracting property locations from IRRES.be
+    """
+    
+    BASE_URL = "https://irres.be/te-koop"
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
+    def __init__(self, timeout: int = 10):
+        """
+        Initialize the scraper.
+        Args:
+            timeout: Request timeout in seconds (default: 10)
+        """
+        self.timeout = timeout
+        self.locations = []
+    
+    @staticmethod
+    def normalize_text(text: str) -> str:
+        """
+        Normalize UTF-8 text to remove accents and special characters.
+        """
+        # Decompose unicode characters
+        nfd = unicodedata.normalize('NFD', text)
+        # Remove combining characters (accents, diacritics)
+        result = ''.join(c for c in nfd if unicodedata.category(c) != 'Mn')
+        return result
+    
+    def fetch_page(self) -> str:
+        """
+        Fetch the IRRES.be property listing page.
+        """
+        try:
+            logger.info(f"Fetching page: {self.BASE_URL}")
+            response = requests.get(
+                self.BASE_URL,
+                headers=self.HEADERS,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as e:
+            logger.error(f"Failed to fetch page: {e}")
+            raise
+    
+    def parse_locations(self, html: str):
+        """
+        Parse locations from HTML content.
+        Extracts location labels from data attributes.
+        """
+        soup = BeautifulSoup(html, 'html.parser')
+        locations_set = set()
+        
+        # Known non-location labels to exclude
+        excluded_labels = {
+            'appartement', 'huis', 'grond', 'contact',
+            'droomwoning', 'nieuwbouw', 'verkocht', 'verkopen',
+            'te-koop', 'aanbod', 'rekrutering'
+        }
+        
+        # Find all elements with data-label attribute
+        elements = soup.find_all(attrs={"data-label": True})
+        
+        for element in elements:
+            label = element.get('data-label', '').strip()
+            
+            # Filter out non-location labels
+            if (label and 
+                label.lower() not in excluded_labels and
+                '€' not in label and
+                not any(char.isdigit() for char in label)):
+                locations_set.add(label)
+        
+        # Convert to sorted list
+        locations = sorted(list(locations_set))
+        logger.info(f"Found {len(locations)} unique locations")
+        
+        return locations
+    
+    def scrape(self):
+        """
+        Main scraping method. Fetches and parses locations.
+        """
+        try:
+            html = self.fetch_page()
+            locations = self.parse_locations(html)
+            self.locations = locations
+            return {
+                "locations": locations,
+                "count": len(locations),
+                "status": "success"
+            }
+        except Exception as e:
+            logger.error(f"Scraping failed: {e}")
+            return {
+                "locations": [],
+                "count": 0,
+                "status": "error",
+                "error": str(e)
+            }
+
+
+class IRRESOfficeImagesScraper:
+    """
+    Scraper for extracting office images from IRRES.be contact page
+    """
+    
+    BASE_URL = "https://irres.be/contact"
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
+    def __init__(self, timeout: int = 10):
+        self.timeout = timeout
+    
+    def fetch_page(self) -> str:
+        try:
+            logger.info(f"Fetching page: {self.BASE_URL}")
+            response = requests.get(
+                self.BASE_URL,
+                headers=self.HEADERS,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as e:
+            logger.error(f"Failed to fetch page: {e}")
+            raise
+    
+    def parse_office_images(self, html: str):
+        """
+        Parse office images from HTML content.
+        """
+        soup = BeautifulSoup(html, 'html.parser')
+        images = {}
+        
+        # Find all picture elements that contain the office images
+        picture_elements = soup.find_all('picture')
+        
+        for picture in picture_elements:
+            # Find img tags within picture elements
+            img = picture.find('img')
+            if not img:
+                continue
+            
+            srcset = img.get('srcset', '')
+            alt = img.get('alt', '').lower()
+            
+            # Extract the first URL from srcset
+            if srcset:
+                url = srcset.split()[0].lstrip('/')
+                
+                # Identify which office based on the URL or alt text
+                if '7723384' in url or 'kerstgevel' in url or 'latem' in alt:
+                    images['IrresLatemImage'] = f"https://irres.be/{url}"
+                elif '7723383' in url or 'destelbergen' in url:
+                    images['IrresDestelbergenImage'] = f"https://irres.be/{url}"
+        
+        logger.info(f"Found {len(images)} office images")
+        return images
+    
+    def scrape(self):
+        try:
+            html = self.fetch_page()
+            images = self.parse_office_images(html)
+            
+            return {
+                "status": "success",
+                "images": images,
+                "count": len(images)
+            }
+        except Exception as e:
+            logger.error(f"Scraping failed: {e}")
+            return {
+                "status": "error",
+                "images": {},
+                "count": 0,
+                "error": str(e)
+            }
+
+# ==============================================================================
+# SECTION 2: LISTING HELPER FUNCTIONS (From original app.py)
+# ==============================================================================
 
 def normalize_text(s):
     """
@@ -63,10 +264,6 @@ def normalize_url(src, add_tracking=False):
     """
     Make URL absolute for the IRRES.be site.
     Handles protocol-relative, root-relative, and relative paths.
-    
-    Args:
-        src: Source URL to normalize
-        add_tracking: If True, adds ?origin=habichat to listing URLs
     """
     if not src:
         return ""
@@ -377,7 +574,6 @@ def extract_property_details_from_detail_soup(soup):
         "Beschikbaarheid": ""
     }
 
-
     try:
         # Find all <li> elements with data-value attribute
         lis = soup.find_all('li', attrs={'data-value': True})
@@ -477,7 +673,9 @@ def fetch_detail_page(url, timeout=12):
         return None
 
 
-# ==================== API ENDPOINTS ====================
+# ==============================================================================
+# SECTION 3: API ENDPOINTS
+# ==============================================================================
 
 @app.route('/api/listings', methods=['GET'])
 def get_listings():
@@ -569,7 +767,6 @@ def get_listings():
                 "Beschikbaarheid": ""
             }
 
-            
             if detail_soup:
                 # Extract contact information
                 first_name, email = extract_contact_and_email_from_detail(detail_soup)
@@ -684,21 +881,106 @@ def get_listings():
             mimetype='application/json; charset=utf-8'
         ), 200
 
+@app.route('/api/locations', methods=['GET'])
+def get_locations():
+    """
+    Get all available property locations from IRRES.be.
+    Query Parameters:
+        - format: Output format (json, csv) - default: json
+    """
+    try:
+        logger.info("Fetching locations from IRRES.be")
+        
+        # Instantiate Scraper and scrape
+        scraper = IRRESLocationScraper()
+        result = scraper.scrape()
+        
+        # Check output format
+        output_format = request.args.get('format', 'json').lower()
+        
+        if output_format == 'csv':
+            csv_content = "location\n"
+            csv_content += "\n".join(result['locations'])
+            
+            return Response(
+                response=csv_content,
+                status=200,
+                mimetype="text/csv",
+                headers={"Content-Disposition": "attachment;filename=irres_locations.csv"}
+            )
+        
+        # Default JSON format
+        response = {
+            "status": "success",
+            "timestamp": datetime.now().isoformat(),
+            "data": {
+                "locations": result['locations'],
+                "count": len(result['locations'])
+            }
+        }
+        
+        logger.info(f"Successfully retrieved {len(result['locations'])} locations")
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching locations: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+            "message": str(e)
+        }), 500
+
+@app.route('/api/office-images', methods=['GET'])
+def get_office_images():
+    """
+    Get IRRES office images from the contact page.
+    """
+    try:
+        logger.info("Fetching office images from IRRES.be")
+        
+        # Instantiate Scraper and scrape
+        scraper = IRRESOfficeImagesScraper()
+        result = scraper.scrape()
+        
+        response = {
+            "status": result['status'],
+            "timestamp": datetime.now().isoformat(),
+            "data": result['images']
+        }
+        
+        if result['status'] == 'success':
+            logger.info(f"Successfully retrieved {result['count']} office images")
+            return jsonify(response), 200
+        else:
+            return jsonify(response), 500
+        
+    except Exception as e:
+        logger.error(f"Error fetching office images: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+            "message": str(e)
+        }), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    return jsonify({"status": "healthy"})
-
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "IRRES Unified Scraper"
+    })
 
 @app.route('/', methods=['GET'])
 def root():
     """API information endpoint"""
     return jsonify({
-        "api": "IRRES.be Listings Scraper",
-        "version": "4.1",
+        "api": "IRRES.be Unified Scraper",
+        "version": "5.0",
         "endpoints": {
             "/api/listings": "Get all property listings with contact info and property details",
+            "/api/locations": "Get all available property locations (supports ?format=csv)",
+            "/api/office-images": "Get IRRES office images",
             "/health": "Health check"
         }
     })
