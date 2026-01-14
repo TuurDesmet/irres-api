@@ -67,15 +67,29 @@ class IRRESLocationScraper:
         self.locations = []
     
     @staticmethod
-    def normalize_text(text: str) -> str:
-        """
-        Normalize UTF-8 text to remove accents and special characters.
-        """
-        # Decompose unicode characters
-        nfd = unicodedata.normalize('NFD', text)
-        # Remove combining characters (accents, diacritics)
-        result = ''.join(c for c in nfd if unicodedata.category(c) != 'Mn')
-        return result
+    def normalize_text(s):
+    """
+    Ensures UTF-8 characters like m² are preserved and HTML entities are decoded.
+    """
+    if s is None: return ""
+    try:
+        s = str(s)
+        # 1. Decode HTML entities (e.g., &sup2; or &#178; -> ²)
+        s = html.unescape(s) 
+        
+        # 2. Fix literal unicode escapes if they exist (e.g. "\\u00b2")
+        if "\\u" in s:
+            try:
+                s = s.encode('utf-8').decode('unicode_escape')
+            except:
+                pass
+
+        # 3. Clean up whitespace but keep characters intact
+        # REMOVED: unicodedata.normalize('NFD') which was breaking the '²'
+        s = " ".join(s.split())
+        return s
+    except Exception:
+        return str(s)
     
     def fetch_page(self) -> str:
         """
