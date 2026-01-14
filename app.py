@@ -49,7 +49,7 @@ TYPE_MAPPING = {
 
 class IRRESLocationScraper:
     """
-    Scraper for extracting property locations from IRRES.be
+    Scraper for extracting property locations and location groups from IRRES.be
     """
     
     BASE_URL = "https://irres.be/te-koop"
@@ -64,7 +64,8 @@ class IRRESLocationScraper:
             timeout: Request timeout in seconds (default: 10)
         """
         self.timeout = timeout
-        self.locations = []
+        self.all_locations = []
+        self.location_groups = {}
     
     @staticmethod
     def normalize_text(text: str) -> str:
@@ -96,55 +97,73 @@ class IRRESLocationScraper:
     
     def parse_locations(self, html: str):
         """
-        Parse locations from HTML content.
-        Extracts location labels from data attributes.
+        Parse locations and location groups from HTML content.
+        Extracts both the main location labels and their associated sub-locations.
         """
         soup = BeautifulSoup(html, 'html.parser')
-        locations_set = set()
         
-        # Known non-location labels to exclude
-        excluded_labels = {
-            'appartement', 'huis', 'grond', 'contact',
-            'droomwoning', 'nieuwbouw', 'verkocht', 'verkopen',
-            'te-koop', 'aanbod', 'rekrutering'
-        }
+        # Find the specific ul element containing location data
+        ul_element = soup.find('ul', class_=re.compile(r'search-values'))
         
-        # Find all elements with data-label attribute
-        elements = soup.find_all(attrs={"data-label": True})
+        if not ul_element:
+            logger.warning("Could not find search-values ul element")
+            return [], {}
+        
+        all_locations = []
+        location_groups = {}
+        
+        # Find all elements with both data-label and data-value attributes
+        elements = ul_element.find_all(attrs={"data-label": True, "data-value": True})
         
         for element in elements:
             label = element.get('data-label', '').strip()
+            value = element.get('data-value', '').strip()
             
-            # Filter out non-location labels
-            if (label and 
-                label.lower() not in excluded_labels and
-                '€' not in label and
-                not any(char.isdigit() for char in label)):
-                locations_set.add(label)
+            if not label or not value:
+                continue
+            
+            # Filter: only include specific location groups
+            # Check if label contains '€' (should be excluded)
+            if '€' in label:
+                continue
+            
+            # Add to all_locations
+            all_locations.append({
+                "label": label,
+                "value": label
+            })
+            
+            # Parse sub-locations from data-value (comma-separated)
+            sub_locations = [loc.strip() for loc in value.split(',') if loc.strip()]
+            
+            # Add to location_groups
+            location_groups[label] = sub_locations
         
-        # Convert to sorted list
-        locations = sorted(list(locations_set))
-        logger.info(f"Found {len(locations)} unique locations")
+        logger.info(f"Found {len(all_locations)} location groups")
+        logger.info(f"Found {len(location_groups)} location group mappings")
         
-        return locations
+        return all_locations, location_groups
     
     def scrape(self):
         """
-        Main scraping method. Fetches and parses locations.
+        Main scraping method. Fetches and parses locations with groups.
         """
         try:
             html = self.fetch_page()
-            locations = self.parse_locations(html)
-            self.locations = locations
+            all_locations, location_groups = self.parse_locations(html)
+            self.all_locations = all_locations
+            self.location_groups = location_groups
             return {
-                "locations": locations,
-                "count": len(locations),
+                "all_locations": all_locations,
+                "location_groups": location_groups,
+                "count": len(all_locations),
                 "status": "success"
             }
         except Exception as e:
             logger.error(f"Scraping failed: {e}")
             return {
-                "locations": [],
+                "all_locations": [],
+                "location_groups": {},
                 "count": 0,
                 "status": "error",
                 "error": str(e)
@@ -884,9 +903,13 @@ def get_listings():
 @app.route('/api/locations', methods=['GET'])
 def get_locations():
     """
-    Get all available property locations from IRRES.be.
+    Get all available property locations and location groups from IRRES.be.
     Query Parameters:
         - format: Output format (json, csv) - default: json
+    
+    Returns:
+        - all_locations: Array of location objects with label and value
+        - location_groups: Dictionary mapping location groups to their sub-locations
     """
     try:
         logger.info("Fetching locations from IRRES.be")
@@ -899,8 +922,9 @@ def get_locations():
         output_format = request.args.get('format', 'json').lower()
         
         if output_format == 'csv':
+            # CSV format: just list location group names
             csv_content = "location\n"
-            csv_content += "\n".join(result['locations'])
+            csv_content += "\n".join([loc['label'] for loc in result['all_locations']])
             
             return Response(
                 response=csv_content,
@@ -914,12 +938,13 @@ def get_locations():
             "status": "success",
             "timestamp": datetime.now().isoformat(),
             "data": {
-                "locations": result['locations'],
-                "count": len(result['locations'])
+                "all_locations": result['all_locations'],
+                "location_groups": result['location_groups'],
+                "count": len(result['all_locations'])
             }
         }
         
-        logger.info(f"Successfully retrieved {len(result['locations'])} locations")
+        logger.info(f"Successfully retrieved {len(result['all_locations'])} location groups")
         return jsonify(response), 200
         
     except Exception as e:
@@ -976,10 +1001,10 @@ def root():
     """API information endpoint"""
     return jsonify({
         "api": "IRRES.be Unified Scraper",
-        "version": "5.0",
+        "version": "6.0",
         "endpoints": {
             "/api/listings": "Get all property listings with contact info and property details",
-            "/api/locations": "Get all available property locations (supports ?format=csv)",
+            "/api/locations": "Get all available property locations and location groups (supports ?format=csv)",
             "/api/office-images": "Get IRRES office images",
             "/health": "Health check"
         }
