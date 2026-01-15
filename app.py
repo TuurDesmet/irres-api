@@ -103,7 +103,8 @@ class IRRESLocationScraper:
         soup = BeautifulSoup(html, 'html.parser')
         
         # Find the specific ul element containing location data
-        ul_element = soup.find('ul', class_=re.compile(r'search-values'))
+        # Look for ul with class containing "search-values"
+        ul_element = soup.find('ul', class_=lambda x: x and 'search-values' in x)
         
         if not ul_element:
             logger.warning("Could not find search-values ul element")
@@ -112,18 +113,19 @@ class IRRESLocationScraper:
         all_locations = []
         location_groups = {}
         
-        # Find all elements with both data-label and data-value attributes
-        elements = ul_element.find_all(attrs={"data-label": True, "data-value": True})
+        # Find all li elements with both data-label and data-value attributes
+        li_elements = ul_element.find_all('li', attrs={"data-label": True, "data-value": True})
         
-        for element in elements:
-            label = element.get('data-label', '').strip()
-            value = element.get('data-value', '').strip()
+        logger.info(f"Found {len(li_elements)} li elements with data-label and data-value")
+        
+        for li in li_elements:
+            label = li.get('data-label', '').strip()
+            value = li.get('data-value', '').strip()
             
             if not label or not value:
                 continue
             
-            # Filter: only include specific location groups
-            # Check if label contains '€' (should be excluded)
+            # Filter: skip if label contains '€' (price elements)
             if '€' in label:
                 continue
             
@@ -140,7 +142,7 @@ class IRRESLocationScraper:
             location_groups[label] = sub_locations
         
         logger.info(f"Found {len(all_locations)} location groups")
-        logger.info(f"Found {len(location_groups)} location group mappings")
+        logger.info(f"Parsed {len(location_groups)} location group mappings")
         
         return all_locations, location_groups
     
@@ -791,7 +793,7 @@ def get_listings():
                 first_name, email = extract_contact_and_email_from_detail(detail_soup)
                 if email:
                     button2_email = f"mailto:{email}"
-                    # Format Button2_Label: "Contacteer <Name> - Irres"
+                    # Format Button2_Label: "Contacteer <n> - Irres"
                     name_label = first_name if first_name else email.split('@')[0]
                     name_label = " ".join([p.capitalize() for p in re.split(r'[._\-]', name_label) if p])
                     button2_label = f"Contacteer {name_label} - Irres"
