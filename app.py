@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
 TYPE_MAPPING = {
@@ -53,15 +53,12 @@ class IRRESLocationScraper:
     """
     
     BASE_URL = "https://irres.be/te-koop"
-    HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
     
-    def __init__(self, timeout: int = 10):
+    def __init__(self, timeout: int = 15):
         """
         Initialize the scraper.
         Args:
-            timeout: Request timeout in seconds (default: 10)
+            timeout: Request timeout in seconds (default: 15)
         """
         self.timeout = timeout
         self.all_locations = []
@@ -86,7 +83,7 @@ class IRRESLocationScraper:
             logger.info(f"Fetching page: {self.BASE_URL}")
             response = requests.get(
                 self.BASE_URL,
-                headers=self.HEADERS,
+                headers=HEADERS,  # Use global HEADERS with updated User-Agent
                 timeout=self.timeout
             )
             response.raise_for_status()
@@ -95,28 +92,30 @@ class IRRESLocationScraper:
             logger.error(f"Failed to fetch page: {e}")
             raise
     
-    def parse_locations(self, html: str):
+    def parse_locations(self, html_content: str):
         """
         Parse locations and location groups from HTML content.
         Extracts both the main location labels and their associated sub-locations.
+        
+        FIXED: Uses attribute selectors [data-label][data-value] instead of relying 
+        on volatile parent class names like 'search-values'.
         """
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # Find the specific ul element containing location data
-        # Look for ul with class containing "search-values"
-        ul_element = soup.find('ul', class_=lambda x: x and 'search-values' in x)
-        
-        if not ul_element:
-            logger.warning("Could not find search-values ul element")
-            return [], {}
+        soup = BeautifulSoup(html_content, 'html.parser')
         
         all_locations = []
         location_groups = {}
         
-        # Find all li elements with both data-label and data-value attributes
-        li_elements = ul_element.find_all('li', attrs={"data-label": True, "data-value": True})
+        # --- CRITICAL FIX START ---
+        # Instead of finding 'ul' with class 'search-values', we look for ANY 'li' 
+        # that possesses the required data attributes. This is structure-agnostic.
+        li_elements = soup.find_all('li', attrs={"data-label": True, "data-value": True})
+        
+        # Fallback: strict CSS selector if find_all misses something specific
+        if not li_elements:
+             li_elements = soup.select('li[data-label][data-value]')
         
         logger.info(f"Found {len(li_elements)} li elements with data-label and data-value")
+        # --- CRITICAL FIX END ---
         
         for li in li_elements:
             label = li.get('data-label', '').strip()
@@ -125,17 +124,20 @@ class IRRESLocationScraper:
             if not label or not value:
                 continue
             
-            # Filter: skip if label contains '€' (price elements)
+            # Filter: skip if label contains '€' (price elements often share this structure)
             if '€' in label:
                 continue
             
-            # Add to all_locations
-            all_locations.append({
+            # Add to all_locations (check for duplicates just in case)
+            loc_entry = {
                 "label": label,
                 "value": label
-            })
+            }
+            if loc_entry not in all_locations:
+                all_locations.append(loc_entry)
             
             # Parse sub-locations from data-value (comma-separated)
+            # We strip() each part to handle spaces like "Deinze, Astene" -> ["Deinze", "Astene"]
             sub_locations = [loc.strip() for loc in value.split(',') if loc.strip()]
             
             # Add to location_groups
@@ -151,15 +153,21 @@ class IRRESLocationScraper:
         Main scraping method. Fetches and parses locations with groups.
         """
         try:
-            html = self.fetch_page()
-            all_locations, location_groups = self.parse_locations(html)
+            html_content = self.fetch_page()
+            all_locations, location_groups = self.parse_locations(html_content)
             self.all_locations = all_locations
             self.location_groups = location_groups
+            
+            status = "success"
+            if not all_locations:
+                status = "warning"
+                logger.warning("Scraper returned 0 locations. Site structure may have changed.")
+
             return {
                 "all_locations": all_locations,
                 "location_groups": location_groups,
                 "count": len(all_locations),
-                "status": "success"
+                "status": status
             }
         except Exception as e:
             logger.error(f"Scraping failed: {e}")
@@ -178,9 +186,6 @@ class IRRESOfficeImagesScraper:
     """
     
     BASE_URL = "https://irres.be/contact"
-    HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
     
     def __init__(self, timeout: int = 10):
         self.timeout = timeout
@@ -190,7 +195,7 @@ class IRRESOfficeImagesScraper:
             logger.info(f"Fetching page: {self.BASE_URL}")
             response = requests.get(
                 self.BASE_URL,
-                headers=self.HEADERS,
+                headers=HEADERS,
                 timeout=self.timeout
             )
             response.raise_for_status()
@@ -199,11 +204,11 @@ class IRRESOfficeImagesScraper:
             logger.error(f"Failed to fetch page: {e}")
             raise
     
-    def parse_office_images(self, html: str):
+    def parse_office_images(self, html_content: str):
         """
         Parse office images from HTML content.
         """
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(html_content, 'html.parser')
         images = {}
         
         # Find all picture elements that contain the office images
@@ -220,21 +225,26 @@ class IRRESOfficeImagesScraper:
             
             # Extract the first URL from srcset
             if srcset:
+                # srcset usually comes as "url width, url width", we take the first one
                 url = srcset.split()[0].lstrip('/')
                 
+                # Construct absolute URL
+                full_url = f"https://irres.be/{url}"
+                
                 # Identify which office based on the URL or alt text
+                # Logic preserved from original code
                 if '7723384' in url or 'kerstgevel' in url or 'latem' in alt:
-                    images['IrresLatemImage'] = f"https://irres.be/{url}"
+                    images['IrresLatemImage'] = full_url
                 elif '7723383' in url or 'destelbergen' in url:
-                    images['IrresDestelbergenImage'] = f"https://irres.be/{url}"
+                    images['IrresDestelbergenImage'] = full_url
         
         logger.info(f"Found {len(images)} office images")
         return images
     
     def scrape(self):
         try:
-            html = self.fetch_page()
-            images = self.parse_office_images(html)
+            html_content = self.fetch_page()
+            images = self.parse_office_images(html_content)
             
             return {
                 "status": "success",
