@@ -30,6 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Updated headers with modern User-Agent to prevent blocking
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
@@ -44,7 +45,7 @@ TYPE_MAPPING = {
 }
 
 # ==============================================================================
-# SECTION 1: LOCATION & OFFICE SCRAPER CLASSES (From original scraper.py)
+# SECTION 1: LOCATION & OFFICE SCRAPER CLASSES
 # ==============================================================================
 
 class IRRESLocationScraper:
@@ -83,7 +84,7 @@ class IRRESLocationScraper:
             logger.info(f"Fetching page: {self.BASE_URL}")
             response = requests.get(
                 self.BASE_URL,
-                headers=HEADERS,  # Use global HEADERS with updated User-Agent
+                headers=HEADERS,
                 timeout=self.timeout
             )
             response.raise_for_status()
@@ -97,26 +98,36 @@ class IRRESLocationScraper:
         Parse locations and location groups from HTML content.
         Extracts both the main location labels and their associated sub-locations.
         
-        FIXED: Uses attribute selectors [data-label][data-value] instead of relying 
-        on volatile parent class names like 'search-values'.
+        Includes strict filtering logic to remove:
+        1. Price elements (containing €)
+        2. Property Types (Huis, Appartement, Grond, etc.)
         """
         soup = BeautifulSoup(html_content, 'html.parser')
         
         all_locations = []
         location_groups = {}
         
-        # --- CRITICAL FIX START ---
-        # Instead of finding 'ul' with class 'search-values', we look for ANY 'li' 
-        # that possesses the required data attributes. This is structure-agnostic.
+        # Structure-agnostic selector: Looks for ANY 'li' that possesses the required data attributes.
         li_elements = soup.find_all('li', attrs={"data-label": True, "data-value": True})
         
-        # Fallback: strict CSS selector if find_all misses something specific
+        # Fallback if find_all misses specific dynamic injections
         if not li_elements:
              li_elements = soup.select('li[data-label][data-value]')
         
         logger.info(f"Found {len(li_elements)} li elements with data-label and data-value")
-        # --- CRITICAL FIX END ---
         
+        # --- STRICT BLOCKLIST ---
+        # These are terms that appear in the filter list but are NOT locations.
+        NON_LOCATION_TYPES = {
+            'Huis', 'Appartement', 'Grond', 
+            'Kantoor', 'Garage', 'Parking', 
+            'Opbrengsteigendom', 'Handelspand',
+            'Industrieel', 'Commercieel', 'Project'
+        }
+
+        # Also get all values from TYPE_MAPPING to ensure we catch translated types
+        MAPPED_TYPES = set(TYPE_MAPPING.values())
+
         for li in li_elements:
             label = li.get('data-label', '').strip()
             value = li.get('data-value', '').strip()
@@ -124,11 +135,23 @@ class IRRESLocationScraper:
             if not label or not value:
                 continue
             
-            # Filter: skip if label contains '€' (price elements often share this structure)
+            # --- FILTER 1: Skip if label contains '€' (price elements) ---
             if '€' in label:
                 continue
+
+            # --- FILTER 2: Skip Property Types (Huis, Grond, etc.) ---
+            # Check if the label OR value matches our blocklists
+            if label in NON_LOCATION_TYPES or value in NON_LOCATION_TYPES:
+                continue
             
-            # Add to all_locations (check for duplicates just in case)
+            if label in MAPPED_TYPES or value in MAPPED_TYPES:
+                continue
+
+            # Extra safety: Check if label is a key in TYPE_MAPPING (e.g. 'Dwelling')
+            if label in TYPE_MAPPING or label.lower() in TYPE_MAPPING:
+                continue
+
+            # Add to all_locations (check for duplicates)
             loc_entry = {
                 "label": label,
                 "value": label
@@ -137,13 +160,13 @@ class IRRESLocationScraper:
                 all_locations.append(loc_entry)
             
             # Parse sub-locations from data-value (comma-separated)
-            # We strip() each part to handle spaces like "Deinze, Astene" -> ["Deinze", "Astene"]
+            # We strip() each part to handle spaces like "Deinze, Astene"
             sub_locations = [loc.strip() for loc in value.split(',') if loc.strip()]
             
             # Add to location_groups
             location_groups[label] = sub_locations
         
-        logger.info(f"Found {len(all_locations)} location groups")
+        logger.info(f"Found {len(all_locations)} location groups after filtering")
         logger.info(f"Parsed {len(location_groups)} location group mappings")
         
         return all_locations, location_groups
@@ -232,7 +255,6 @@ class IRRESOfficeImagesScraper:
                 full_url = f"https://irres.be/{url}"
                 
                 # Identify which office based on the URL or alt text
-                # Logic preserved from original code
                 if '7723384' in url or 'kerstgevel' in url or 'latem' in alt:
                     images['IrresLatemImage'] = full_url
                 elif '7723383' in url or 'destelbergen' in url:
@@ -261,7 +283,7 @@ class IRRESOfficeImagesScraper:
             }
 
 # ==============================================================================
-# SECTION 2: LISTING HELPER FUNCTIONS (From original app.py)
+# SECTION 2: LISTING HELPER FUNCTIONS
 # ==============================================================================
 
 def normalize_text(s):
