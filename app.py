@@ -255,10 +255,14 @@ class IRRESOfficeImagesScraper:
                 full_url = f"https://irres.be/{url}"
                 
                 # Identify which office based on the URL or alt text
+                # Logic for Latem and Destelbergen
                 if '7723384' in url or 'kerstgevel' in url or 'latem' in alt:
                     images['IrresLatemImage'] = full_url
                 elif '7723383' in url or 'destelbergen' in url:
                     images['IrresDestelbergenImage'] = full_url
+                # Logic for Gent office (matches ID 7768051 or 'gent' in text)
+                elif '7768051' in url or 'gent' in alt:
+                    images['IrresGentImage'] = full_url
         
         logger.info(f"Found {len(images)} office images")
         return images
