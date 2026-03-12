@@ -1,6 +1,6 @@
 """
-Application entry point for Render deployment.
-This wrapper imports the Flask app from Irres_api-main/app.py
+WSGI application entry point for Render deployment.
+This imports the Flask app from Irres_api-main/app.py
 """
 
 import sys
