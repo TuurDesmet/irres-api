@@ -10,8 +10,9 @@ workers = 2
 worker_class = "sync"
 
 # Timeout settings - IMPORTANT for slow scraping requests
-timeout = 300  # 5 minutes - allows time for all listings to be fetched
-graceful_timeout = 300
+# Allow up to 15 minutes so the full scrape can complete, even when there are many listings
+timeout = 900
+graceful_timeout = 900
 keepalive = 5
 
 # Logging
