@@ -1,0 +1,5 @@
+requests==2.31.0
+
+# Security Note: Always check for latest secure versions
+# Last updated: 2024-03-12
+# Check for vulnerabilities: pip audit

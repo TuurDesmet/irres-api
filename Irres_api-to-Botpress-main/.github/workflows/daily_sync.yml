@@ -1,0 +1,49 @@
+name: Daily Botpress Sync
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs at 00:00 (midnight) every day
+  workflow_dispatch: # Allows you to run it manually from the GitHub Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    # ── timeout-minutes ────────────────────────────────────────────────────────
+    # This is a hard kill switch for the entire job.
+    # If the job is still running after this many minutes, GitHub will cancel it.
+    #
+    # Why 20 minutes?
+    #   - The /api/listings scrape visits every property detail page one by one.
+    #     With ~15–20 listings, this typically takes 3–8 minutes on Render.com.
+    #   - We set this to 20 minutes to give the scrape comfortable room to finish,
+    #     while still preventing a runaway job from eating all your Action minutes.
+    #   - Increase this number if the job keeps getting killed before finishing.
+    #   - Decrease it if you want faster failure detection (minimum: ~10 minutes).
+    #
+    timeout-minutes: 7
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@0a5c61591373683585e88016265dfa290a4218a3
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        # sync_botpress.py only needs 'requests', so we install it directly.
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run Sync Script
+        env:
+          BOT_ID: ${{ secrets.BOT_ID }}
+          BOTPRESS_TOKEN: ${{ secrets.BOTPRESS_TOKEN }}
+        run: python sync_botpress.py
