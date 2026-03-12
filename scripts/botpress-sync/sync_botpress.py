@@ -9,6 +9,9 @@ from datetime import datetime
 BOT_ID = os.getenv("BOT_ID")
 TOKEN = os.getenv("BOTPRESS_TOKEN")
 
+# Irres API key (for protected endpoints on Render)
+IRRES_API_KEY = os.getenv("IRRES_API_KEY") or os.getenv("API_KEY")
+
 # API Endpoints
 BASE_API = "https://irres-api.onrender.com/api"
 LISTINGS_API = f"{BASE_API}/listings"
@@ -21,6 +24,9 @@ HEADERS = {
     "x-bot-id": BOT_ID,
     "Content-Type": "application/json"
 }
+
+# Irres API headers (used for all calls to the Render API)
+IRRES_API_HEADERS = {"X-API-KEY": IRRES_API_KEY} if IRRES_API_KEY else {}
 
 # === TIMEOUT CONFIGURATION ===
 #
@@ -177,8 +183,12 @@ def sync_listings() -> None:
       3. Only after validation passes: clear the table and insert fresh rows.
     """
     print("\n[Listings] Fetching data from API...")
+    if not IRRES_API_KEY:
+        print("[Listings] ❌ IRRES_API_KEY / API_KEY is not set. Cannot authenticate to the Irres API.")
+        print("[Listings] ⚠️  Botpress table was NOT modified.")
+        return
     try:
-        res = requests.get(LISTINGS_API, timeout=LISTINGS_TIMEOUT)
+        res = requests.get(LISTINGS_API, headers=IRRES_API_HEADERS, timeout=LISTINGS_TIMEOUT)
         res.raise_for_status()
         data = res.json()
     except Exception as e:
@@ -239,8 +249,12 @@ def sync_office_images() -> None:
       3. Only after validation passes: clear the table and insert fresh rows.
     """
     print("\n[OfficeImages] Fetching data from API...")
+    if not IRRES_API_KEY:
+        print("[OfficeImages] ❌ IRRES_API_KEY / API_KEY is not set. Cannot authenticate to the Irres API.")
+        print("[OfficeImages] ⚠️  Botpress table was NOT modified.")
+        return
     try:
-        res = requests.get(IMAGES_API, timeout=FAST_API_TIMEOUT)
+        res = requests.get(IMAGES_API, headers=IRRES_API_HEADERS, timeout=FAST_API_TIMEOUT)
         res.raise_for_status()
         data = res.json()
     except Exception as e:
@@ -286,8 +300,12 @@ def sync_locations() -> None:
       3. Only after validation passes: clear the table and insert the fresh row.
     """
     print("\n[Locations] Fetching data from API...")
+    if not IRRES_API_KEY:
+        print("[Locations] ❌ IRRES_API_KEY / API_KEY is not set. Cannot authenticate to the Irres API.")
+        print("[Locations] ⚠️  Botpress table was NOT modified.")
+        return
     try:
-        res = requests.get(LOCATIONS_API, timeout=FAST_API_TIMEOUT)
+        res = requests.get(LOCATIONS_API, headers=IRRES_API_HEADERS, timeout=FAST_API_TIMEOUT)
         res.raise_for_status()
         data = res.json()
     except Exception as e:
