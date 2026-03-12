@@ -7,6 +7,7 @@ This directory contains utility scripts for the Irres API project.
 A daily synchronization script that syncs data from the Irres Listings API to a Botpress chatbot.
 
 ### Features
+
 - Syncs listing data with property details and images
 - Syncs office images
 - Syncs location filters
@@ -24,6 +25,7 @@ python sync_botpress.py
 ### Environment Variables
 
 The script requires two environment variables:
+
 - `BOT_ID`: Your Botpress Bot ID
 - `BOTPRESS_TOKEN`: Your Botpress API token
 
@@ -31,7 +33,7 @@ The script requires two environment variables:
 
 1. Fetches data from three API endpoints:
    - `/api/listings` - Property listings with details
-   - `/api/office-images` - Office photos  
+   - `/api/office-images` - Office photos
    - `/api/locations` - Location filters
 
 2. Validates responses before syncing to prevent data loss

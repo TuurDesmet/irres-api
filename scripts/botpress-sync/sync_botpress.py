@@ -10,7 +10,7 @@ BOT_ID = os.getenv("BOT_ID")
 TOKEN = os.getenv("BOTPRESS_TOKEN")
 
 # API Endpoints
-BASE_API = "https://irres-listings-api.onrender.com/api"
+BASE_API = "https://irres-api.onrender.com/api"
 LISTINGS_API = f"{BASE_API}/listings"
 IMAGES_API = f"{BASE_API}/office-images"
 LOCATIONS_API = f"{BASE_API}/locations"

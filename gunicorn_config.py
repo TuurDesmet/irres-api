@@ -1,11 +1,9 @@
-# ===== Irres-API ======
+import os
 
-import multiprocessing
+# Bind to 0.0.0.0 on Render's assigned port (falls back to 5000 locally)
+bind = f"0.0.0.0:{os.environ.get('PORT', '5000')}"
 
-# Bind to 0.0.0.0 on the port Render provides
-bind = "0.0.0.0:5000"
-
-# Use 2-4 workers (adjust based on your Render plan)
+# Use 2 workers (enough for this small API; adjust for your plan if needed)
 workers = 2
 
 # Worker class
