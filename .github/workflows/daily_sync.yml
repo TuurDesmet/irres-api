@@ -1,1 +1,32 @@
+name: Daily Botpress Sync
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Runs daily at 2 AM UTC
+  workflow_dispatch:      # Allow manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          cd Irres_api-to-Botpress-main
+          pip install -r requirements.txt
+      
+      - name: Run Botpress Sync
+        env:
+          BOT_ID: ${{ secrets.BOT_ID }}
+          BOTPRESS_TOKEN: ${{ secrets.BOTPRESS_TOKEN }}
+        run: |
+          cd Irres_api-to-Botpress-main
+          python sync_botpress.py
 
