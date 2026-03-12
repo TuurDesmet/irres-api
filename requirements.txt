@@ -1,0 +1,14 @@
+# ===== Irres-API ======
+
+Flask==3.0.0
+flask-cors==4.0.0
+requests==2.31.0
+beautifulsoup4==4.12.2
+gunicorn==21.2.0
+python-dotenv==1.0.0
+
+# ===== SECURITY NOTES =====
+# Always verify dependencies for known vulnerabilities
+# Check for CVEs: pip audit
+# Last updated: 2024-03-12
+# Consider using dependency management tools like pip-tools or poetry
