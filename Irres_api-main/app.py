@@ -30,9 +30,19 @@ if API_KEY is None:
 
 @app.before_request
 def require_api_key():
+    """
+    Authenticate requests using the X-API-KEY header only.
+    Query parameters are NOT accepted for API key transmission to prevent:
+    - Server access logs exposure
+    - Proxy/CDN logs exposure
+    - Browser history exposure
+    - Referrer header leakage
+    
+    This complies with OWASP Top 10 2021 - A02:2021 Cryptographic Failures
+    """
     if request.endpoint in ['static']:  # Skip for static files
         return
-    if request.args.get('api_key') != API_KEY and request.headers.get('X-API-KEY') != API_KEY:
+    if request.headers.get('X-API-KEY') != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
 # Configure logging (merged from both projects)
