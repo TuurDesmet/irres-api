@@ -6,6 +6,8 @@
 import os
 from flask import Flask, jsonify, Response, request
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -20,6 +22,20 @@ from datetime import datetime
 app = Flask(__name__)
 CORS(app)
 app.config['JSON_AS_ASCII'] = False  # Ensure UTF-8 characters in JSON
+
+# ==================== RATE LIMITING CONFIGURATION ====================
+# Initialize rate limiter with memory storage (default)
+# Limits expensive scraping endpoints to prevent resource exhaustion
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,  # Rate limit by IP address
+    default_limits=["200 per day", "50 per hour"],  # Global defaults
+    storage_uri="memory://"  # Use in-memory storage (suitable for single server)
+)
+
+# Disable rate limiting on specific endpoints if needed
+limiter.exempt(lambda: request.endpoint == 'health')
+limiter.exempt(lambda: request.endpoint == 'index')
 
 # ==================== CONFIGURATION & LOGGING ====================
 
@@ -100,6 +116,31 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# ==================== RATE LIMIT ERROR HANDLER ====================
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    """
+    Handle rate limit exceeded errors (HTTP 429).
+    
+    Provides clear feedback to API consumers about rate limit status.
+    
+    SECURITY: Rate limiting prevents resource exhaustion attacks.
+    Protects against:
+    - OWASP API5:2023 - Rate Limiting
+    - CWE-770: Allocation of Resources Without Limits or Throttling
+    - DoS attacks on expensive scraping endpoints
+    """
+    logger.warning(
+        f"Rate limit exceeded for {request.remote_addr} on {request.path}. "
+        f"Limit: 15 requests per hour per endpoint. "
+        f"User-Agent: {request.headers.get('User-Agent', 'unknown')}"
+    )
+    return jsonify({
+        "error": "Rate Limit Exceeded",
+        "message": "Too many requests. Maximum 15 requests per hour per endpoint.",
+        "retry_after": 3600  # Seconds until next request allowed
+    }), 429
 
 # Updated headers with modern User-Agent to prevent blocking
 HEADERS = {
@@ -971,11 +1012,25 @@ def fetch_detail_page(url, timeout=12):
 # SECTION 3: API ENDPOINTS
 # ==============================================================================
 
+@limiter.limit("15 per hour")
 @app.route('/api/listings', methods=['GET'])
 def get_listings():
     """
     Main endpoint: Scrapes all listings from IRRES.be/te-koop
     Returns JSON with complete listing information including contact details and property details.
+    
+    RATE LIMITED: 15 requests per hour per IP address
+    
+    This is an expensive operation:
+    - Initial page scrape: ~15 seconds
+    - Per-listing detail page fetches: 15-20 requests × 10+ seconds each
+    - Total time: 3-8 minutes per request
+    
+    Rate limiting prevents:
+    - Server resource exhaustion (CPU, memory, bandwidth)
+    - Worker process starvation (only 2 sync workers)
+    - IRRES.be IP ban from hitting them too hard
+    - Authenticated DoS attacks on expensive endpoints
     """
     try:
         list_page_url = "https://irres.be/te-koop"
@@ -1165,12 +1220,15 @@ def get_listings():
             mimetype='application/json; charset=utf-8'
         ), 200
 
+@limiter.limit("15 per hour")
 @app.route('/api/locations', methods=['GET'])
 def get_locations():
     """
     Get all available property locations and location groups from IRRES.be.
     Query Parameters:
         - format: Output format (json, csv) - default: json
+    
+    RATE LIMITED: 15 requests per hour per IP address
     
     Returns:
         - all_locations: Array of location objects with label and value
@@ -1220,10 +1278,13 @@ def get_locations():
             "message": str(e)
         }), 500
 
+@limiter.limit("15 per hour")
 @app.route('/api/office-images', methods=['GET'])
 def get_office_images():
     """
     Get IRRES office images from the contact page.
+    
+    RATE LIMITED: 15 requests per hour per IP address
     """
     try:
         logger.info("Fetching office images from IRRES.be")
