@@ -31,19 +31,68 @@ if API_KEY is None:
 @app.before_request
 def require_api_key():
     """
-    Authenticate requests using the X-API-KEY header only.
-    Query parameters are NOT accepted for API key transmission to prevent:
-    - Server access logs exposure
-    - Proxy/CDN logs exposure
-    - Browser history exposure
-    - Referrer header leakage
+    CRITICAL SECURITY: Authenticate requests using ONLY the X-API-KEY header.
     
-    This complies with OWASP Top 10 2021 - A02:2021 Cryptographic Failures
+    Query parameters (?api_key=...) are COMPLETELY REJECTED for security.
+    
+    This prevents API key exposure in:
+    - Server access logs containing URLs
+    - Proxy/CDN logs
+    - Browser history
+    - HTTP Referer headers
+    - Log aggregation systems
+    
+    Complies with: OWASP Top 10 2021 - A02:2021 Cryptographic Failures
+    
+    Authentication Rules:
+    1. Only X-API-KEY header is accepted
+    2. Query parameters are completely ignored (not used for auth)
+    3. Invalid or missing header = 401 Unauthorized
+    4. Static files are exempt from authentication
     """
-    if request.endpoint in ['static']:  # Skip for static files
+    # Skip authentication only for static files
+    if request.endpoint == 'static':
         return
-    if request.headers.get('X-API-KEY') != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
+    
+    # CRITICAL: Reject any request with ?api_key=... in query string
+    # This explicitly prevents query parameter-based authentication
+    if 'api_key' in request.args:
+        logger.warning(
+            f"SECURITY: Rejected request with ?api_key query parameter from {request.remote_addr}. "
+            f"Path: {request.path}. Use X-API-KEY header instead."
+        )
+        return jsonify({
+            "error": "Unauthorized",
+            "message": "API key must be provided via X-API-KEY header, not query parameters"
+        }), 401
+    
+    # Extract API key from X-API-KEY header ONLY
+    provided_api_key = request.headers.get('X-API-KEY')
+    
+    # Check if API key is present in header
+    if not provided_api_key:
+        logger.warning(
+            f"SECURITY: Unauthorized request without X-API-KEY header from {request.remote_addr}. "
+            f"Path: {request.path}"
+        )
+        return jsonify({
+            "error": "Unauthorized",
+            "message": "X-API-KEY header is required"
+        }), 401
+    
+    # Check if API key is valid
+    if provided_api_key != API_KEY:
+        logger.warning(
+            f"SECURITY: Invalid X-API-KEY provided from {request.remote_addr}. "
+            f"Path: {request.path}"
+        )
+        return jsonify({
+            "error": "Unauthorized",
+            "message": "Invalid X-API-KEY"
+        }), 401
+    
+    # Authorization successful - allow request to proceed
+    return None
 
 # Configure logging (merged from both projects)
 logging.basicConfig(
