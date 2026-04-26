@@ -52,10 +52,9 @@ IRRES_API_HEADERS = {"X-API-KEY": IRRES_API_KEY} if IRRES_API_KEY else {}
 #   connect = 15 s  → gives Render.com's free-tier server time to cold-start
 #                      (free servers spin down after inactivity and can take
 #                      ~50 s to wake up, but 15 s is enough once they're awake)
-#   read    = 600 s → 10 minutes; gives the scrape plenty of room to finish
+#   read    = 450 s → 7.5 minutes; gives the scrape plenty of room to finish
 #                      even if the site is slow or there are many listings.
-#                      Increase this number if you ever see read timeout errors
-#                      again. Decrease it if you want to fail faster.
+#                      Increase this number if you ever see read timeout errors.
 #
 LISTINGS_TIMEOUT = (15, 450)
 
@@ -65,8 +64,7 @@ LISTINGS_TIMEOUT = (15, 450)
 #
 #   connect = 15 s  → same cold-start buffer as above
 #   read    = 90 s  → generous buffer; these endpoints should finish in < 10 s
-#                      under normal conditions. Only increase this if you see
-#                      read timeout errors on office-images or locations.
+#                      under normal conditions.
 #
 FAST_API_TIMEOUT = (15, 90)
 
@@ -212,21 +210,21 @@ def sync_listings() -> None:
         # Serialize nested 'details' object to a JSON string for flat storage
         details_json = json.dumps(l.get('details', {}), ensure_ascii=False)
         row = {
-            "listing_id":     l.get('listing_id'),
-            "listing_url":    l.get('listing_url'),
-            "photo_url":      l.get('photo_url'),
-            "price":          l.get('price'),
-            "location":       l.get('location'),
-            "description":    l.get('description'),
-            "listing_type":   l.get('listing_type'),
-            "Title":          l.get('Title', ""),
-            "Button1_Label":  l.get('Button1_Label', "Bekijk het op onze website"),
-            "Button2_Label":  l.get('Button2_Label', ""),
-            "Button2_email":  l.get('Button2_email', ""),
-            "Button3_Label":  l.get('Button3_Label'),
-            "Button3_Value":  l.get('Button3_Value'),
-            "details":        details_json,
-            "last_updated":   datetime.now().isoformat()
+            "listing_id":    l.get('listing_id'),
+            "listing_url":   l.get('listing_url'),
+            "photo_url":     l.get('photo_url'),
+            "price":         l.get('price'),
+            "location":      l.get('location'),
+            "description":   l.get('description'),
+            "listing_type":  l.get('listing_type'),
+            "Title":         l.get('Title', ""),
+            "Button1_Label": l.get('Button1_Label', "Bekijk het op onze website"),
+            "Button2_Label": l.get('Button2_Label', ""),
+            "Button2_email": l.get('Button2_email', ""),
+            "Button3_Label": l.get('Button3_Label'),
+            "Button3_Value": l.get('Button3_Value'),
+            "details":       details_json,
+            "last_updated":  datetime.now().isoformat()
         }
         rows.append(row)
 
@@ -235,6 +233,9 @@ def sync_listings() -> None:
         res = requests.post(insert_url, headers=HEADERS, json={"rows": rows}, timeout=BOTPRESS_TIMEOUT)
         res.raise_for_status()
         print(f"[Listings] ✅ Inserted {len(rows)} listing(s) successfully.")
+    except requests.exceptions.HTTPError as e:
+        print(f"[Listings] ❌ Failed to insert listings into Botpress: {e}")
+        print(f"[Listings] ❌ Response body: {e.response.text}")
     except Exception as e:
         print(f"[Listings] ❌ Failed to insert listings into Botpress: {e}")
 
@@ -285,25 +286,36 @@ def sync_office_images() -> None:
         res = requests.post(insert_url, headers=HEADERS, json={"rows": image_rows}, timeout=BOTPRESS_TIMEOUT)
         res.raise_for_status()
         print(f"[OfficeImages] ✅ Inserted {len(image_rows)} office image(s) successfully.")
+    except requests.exceptions.HTTPError as e:
+        print(f"[OfficeImages] ❌ Failed to insert office images into Botpress: {e}")
+        print(f"[OfficeImages] ❌ Response body: {e.response.text}")
     except Exception as e:
         print(f"[OfficeImages] ❌ Failed to insert office images into Botpress: {e}")
 
 
 def sync_locations() -> None:
     """
-    Syncs Locations to FilterLocationsTable as a single row.
-    Columns populated: 'all_locations' and 'location_groups' (both JSON strings).
+    Syncs Locations to FilterLocationsTable.
+
+    Each location group is stored as a SEPARATE ROW with two columns:
+      - location_label  : display name, e.g. "Gent + deelgemeenten"
+      - location_values : JSON array string of sub-locations,
+                          e.g. '["Gent", "Mariakerke", "Drongen", ...]'
+
+    This row-per-group structure lets the Botpress chatbot query a specific
+    group by label without parsing a giant JSON blob.
 
     Safety flow:
       1. Fetch data from the locations API.
       2. Validate the response — if invalid, abort without touching Botpress.
-      3. Only after validation passes: clear the table and insert the fresh row.
+      3. Only after validation passes: clear the table and insert fresh rows.
     """
     print("\n[Locations] Fetching data from API...")
     if not IRRES_API_KEY:
         print("[Locations] ❌ IRRES_API_KEY / API_KEY is not set. Cannot authenticate to the Irres API.")
         print("[Locations] ⚠️  Botpress table was NOT modified.")
         return
+
     try:
         res = requests.get(LOCATIONS_API, headers=IRRES_API_HEADERS, timeout=FAST_API_TIMEOUT)
         res.raise_for_status()
@@ -321,23 +333,30 @@ def sync_locations() -> None:
         return
     print(f"[Locations] ✅ Validation passed — {reason}")
 
-    # Safe to proceed: clear old data and insert fresh row
+    # Safe to proceed: clear old data and insert fresh rows
     delete_table_rows("FilterLocationsTable")
 
-    all_locations_data   = data['data'].get('all_locations', [])
     location_groups_data = data['data'].get('location_groups', {})
 
-    # ensure_ascii=False preserves accented characters (e.g. French 'é')
-    row_payload = {
-        "all_locations":   json.dumps(all_locations_data,   ensure_ascii=False),
-        "location_groups": json.dumps(location_groups_data, ensure_ascii=False)
-    }
+    # Build one row per location group
+    rows = []
+    for label, values in location_groups_data.items():
+        rows.append({
+            "location_label":  label,
+            "location_values": json.dumps(values, ensure_ascii=False)
+        })
+
+    print(f"[Locations] Inserting {len(rows)} row(s) into FilterLocationsTable...")
+    print(f"[Locations] Preview of first row: {rows[0] if rows else 'none'}")
 
     try:
         insert_url = "https://api.botpress.cloud/v1/tables/FilterLocationsTable/rows"
-        res = requests.post(insert_url, headers=HEADERS, json={"rows": [row_payload]}, timeout=BOTPRESS_TIMEOUT)
+        res = requests.post(insert_url, headers=HEADERS, json={"rows": rows}, timeout=BOTPRESS_TIMEOUT)
         res.raise_for_status()
-        print("[Locations] ✅ Inserted locations and location groups into 1 row successfully.")
+        print(f"[Locations] ✅ Inserted {len(rows)} location group(s) successfully.")
+    except requests.exceptions.HTTPError as e:
+        print(f"[Locations] ❌ Failed to insert locations into Botpress: {e}")
+        print(f"[Locations] ❌ Response body: {e.response.text}")
     except Exception as e:
         print(f"[Locations] ❌ Failed to insert locations into Botpress: {e}")
 
