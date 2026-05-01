@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 # === CONFIGURATION ===
@@ -9,10 +10,11 @@ BOT_ID = os.getenv("BOT_ID")
 TOKEN = os.getenv("BOTPRESS_TOKEN")
 IRRES_API_KEY = os.getenv("IRRES_API_KEY") or os.getenv("API_KEY")
 
-BASE_API = "https://irres-api.onrender.com/api"
-LISTINGS_API = f"{BASE_API}/listings"
-IMAGES_API = f"{BASE_API}/office-images"
-LOCATIONS_API = f"{BASE_API}/locations"
+BASE_API       = "https://irres-api.onrender.com/api"
+HEALTH_URL     = "https://irres-api.onrender.com/health"
+LISTINGS_API   = f"{BASE_API}/listings"
+IMAGES_API     = f"{BASE_API}/office-images"
+LOCATIONS_API  = f"{BASE_API}/locations"
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
@@ -24,9 +26,16 @@ IRRES_API_HEADERS = {"X-API-KEY": IRRES_API_KEY} if IRRES_API_KEY else {}
 
 # === TIMEOUT CONFIGURATION ===
 # (connect_seconds, read_seconds)
-LISTINGS_TIMEOUT = (15, 450)   # /api/listings is slow: visits every detail page
-FAST_API_TIMEOUT = (15, 90)    # /api/office-images and /api/locations are fast
-BOTPRESS_TIMEOUT = (10, 30)    # Botpress Cloud is always fast
+LISTINGS_TIMEOUT  = (15, 450)  # /api/listings visits every detail page — slow by design
+FAST_API_TIMEOUT  = (15, 90)   # /api/office-images and /api/locations are fast
+BOTPRESS_TIMEOUT  = (10, 30)   # Botpress Cloud is always fast
+HEALTH_TIMEOUT    = (10, 15)   # Quick ping to wake up the server
+
+# === WAKE-UP & RETRY CONFIGURATION ===
+WAKE_UP_MAX_WAIT    = 90   # Max seconds to wait for the server to come online
+WAKE_UP_INTERVAL    = 5    # Seconds between each health check ping
+LISTINGS_MAX_RETRY  = 3    # Number of times to retry /api/listings on failure
+LISTINGS_RETRY_WAIT = 30   # Seconds to wait between each retry
 
 # === DISPLAY HELPERS ===
 
@@ -40,10 +49,13 @@ def divider():
 
 def step(label, ok, detail=""):
     status = "✅" if ok else "❌"
-    print(f"  {label:<20} {status}  {detail}")
+    print(f"  {label:<22} {status}  {detail}")
+
+def step_warn(label, detail=""):
+    print(f"  {label:<22} ⚠️   {detail}")
 
 def step_skip(label, reason="Skipped"):
-    print(f"  {label:<20} ⏭️   {reason}")
+    print(f"  {label:<22} ⏭️   {reason}")
 
 def section_header(title):
     print(f"\n{title}")
@@ -51,8 +63,42 @@ def section_header(title):
 def section_result(ok):
     status = "✅  SUCCESS" if ok else "❌  FAILED"
     divider()
-    print(f"  {'Result':<20} {status}")
+    print(f"  {'Result':<22} {status}")
     line()
+
+
+# === WAKE-UP HELPER ===
+
+def wait_for_server():
+    """
+    Pings the /health endpoint repeatedly until the server responds with HTTP 200.
+
+    Render.com free-tier servers spin down after inactivity and need 30-50
+    seconds to cold-start. Sending a lightweight /health ping first wakes the
+    server up without triggering the expensive /api/listings scrape.
+
+    Returns:
+        (True, elapsed_seconds)  if server came online within WAKE_UP_MAX_WAIT
+        (False, elapsed_seconds) if server did not respond in time
+    """
+    start = time.time()
+    attempt = 0
+
+    while True:
+        elapsed = int(time.time() - start)
+        attempt += 1
+
+        try:
+            res = requests.get(HEALTH_URL, headers=IRRES_API_HEADERS, timeout=HEALTH_TIMEOUT)
+            if res.status_code == 200:
+                return True, elapsed
+        except Exception:
+            pass  # Server not yet awake — keep trying
+
+        if elapsed >= WAKE_UP_MAX_WAIT:
+            return False, elapsed
+
+        time.sleep(WAKE_UP_INTERVAL)
 
 
 # === VALIDATION HELPERS ===
@@ -129,38 +175,82 @@ def delete_table_rows(table_name):
 
 def sync_listings():
     """
-    Fetches all listings from the IRRES API and inserts them into ListingsTable.
+    Syncs listings to ListingsTable.
+
+    Flow:
+      1. Wake up the Render.com server via /health ping.
+      2. Fetch /api/listings with automatic retry on failure.
+      3. Validate the response.
+      4. Clear ListingsTable.
+      5. Insert fresh rows.
+
     Returns True if fully successful, False otherwise.
     """
     section_header("LISTINGS")
 
     # --- Check API key ---
     if not IRRES_API_KEY:
-        step("Fetch API",     False, "IRRES_API_KEY is not set")
+        step("Wake up server", False, "IRRES_API_KEY is not set")
+        step_skip("Fetch API")
         step_skip("Validate data")
         step_skip("Clear table")
         step_skip("Insert data")
         section_result(False)
         return False
 
-    # --- Step 1: Fetch ---
-    try:
-        res = requests.get(LISTINGS_API, headers=IRRES_API_HEADERS, timeout=LISTINGS_TIMEOUT)
-        res.raise_for_status()
-        data = res.json()
-        fetch_ok = True
-        fetch_detail = f"{len(data.get('listings', []))} listings fetched"
-    except Exception as e:
-        step("Fetch API", False, str(e))
+    # --- Step 1: Wake up server ---
+    # Render.com free tier spins down after inactivity.
+    # We ping /health repeatedly until the server responds, BEFORE hitting
+    # the expensive /api/listings endpoint.
+    print(f"  {'Wake up server':<22} ⏳  Pinging server (max {WAKE_UP_MAX_WAIT}s)...")
+    server_ok, elapsed = wait_for_server()
+    step("Wake up server", server_ok, f"Server online in {elapsed}s" if server_ok else f"No response after {elapsed}s")
+
+    if not server_ok:
+        step_skip("Fetch API",     "Skipped (server offline)")
+        step_skip("Validate data", "Skipped (server offline)")
+        step_skip("Clear table",   "Skipped (server offline)")
+        step_skip("Insert data",   "Skipped (server offline)")
+        section_result(False)
+        return False
+
+    # --- Step 2: Fetch with retry ---
+    # /api/listings scrapes every detail page one by one — it can still fail
+    # on the first attempt if the server just woke up and isn't fully ready.
+    # We retry up to LISTINGS_MAX_RETRY times with a wait between each attempt.
+    data = None
+    fetch_error = None
+
+    for attempt in range(1, LISTINGS_MAX_RETRY + 1):
+        try:
+            res = requests.get(LISTINGS_API, headers=IRRES_API_HEADERS, timeout=LISTINGS_TIMEOUT)
+            res.raise_for_status()
+            data = res.json()
+            fetch_error = None
+            break  # Success — stop retrying
+        except Exception as e:
+            fetch_error = str(e)
+            if attempt < LISTINGS_MAX_RETRY:
+                step_warn(
+                    "Fetch API",
+                    f"Attempt {attempt}/{LISTINGS_MAX_RETRY} failed — retrying in {LISTINGS_RETRY_WAIT}s"
+                )
+                time.sleep(LISTINGS_RETRY_WAIT)
+
+    if data is None:
+        step("Fetch API", False, f"All {LISTINGS_MAX_RETRY} attempts failed: {fetch_error}")
         step_skip("Validate data", "Skipped (fetch failed)")
         step_skip("Clear table",   "Skipped (fetch failed)")
         step_skip("Insert data",   "Skipped (fetch failed)")
         section_result(False)
         return False
 
-    step("Fetch API", fetch_ok, fetch_detail)
+    attempt_label = f"{len(data.get('listings', []))} listings fetched"
+    if attempt > 1:
+        attempt_label += f" (attempt {attempt}/{LISTINGS_MAX_RETRY})"
+    step("Fetch API", True, attempt_label)
 
-    # --- Step 2: Validate ---
+    # --- Step 3: Validate ---
     is_valid, reason = validate_listings_data(data)
     step("Validate data", is_valid, reason)
     if not is_valid:
@@ -169,7 +259,7 @@ def sync_listings():
         section_result(False)
         return False
 
-    # --- Step 3: Clear table ---
+    # --- Step 4: Clear table ---
     clear_ok, clear_detail = delete_table_rows("ListingsTable")
     step("Clear table", clear_ok, clear_detail)
     if not clear_ok:
@@ -177,7 +267,7 @@ def sync_listings():
         section_result(False)
         return False
 
-    # --- Step 4: Insert ---
+    # --- Step 5: Insert ---
     rows = []
     for l in data['listings']:
         details_json = json.dumps(l.get('details', {}), ensure_ascii=False)
@@ -223,7 +313,8 @@ def sync_listings():
 
 def sync_office_images():
     """
-    Fetches office images from the IRRES API and inserts them into OfficeImagesTable.
+    Syncs office images to OfficeImagesTable.
+    Server is already awake after sync_listings() so no wake-up needed.
     Returns True if fully successful, False otherwise.
     """
     section_header("OFFICE IMAGES")
@@ -301,12 +392,12 @@ def sync_office_images():
 
 def sync_locations():
     """
-    Fetches locations from the IRRES API and stores them in FilterLocationsTable.
-
+    Syncs locations to FilterLocationsTable.
     Each location group gets its own row:
       label (string) - display name,  e.g. "Gent + deelgemeenten"
       value (string) - JSON array,    e.g. '["Gent", "Mariakerke", ...]'
 
+    Server is already awake after sync_listings() so no wake-up needed.
     Returns True if fully successful, False otherwise.
     """
     section_header("LOCATIONS")
@@ -406,16 +497,15 @@ if __name__ == "__main__":
     passed   = sum(1 for ok in results.values() if ok)
     failed   = [name for name, ok in results.items() if not ok]
 
-    # Final summary
+    minutes, seconds = divmod(int(duration.total_seconds()), 60)
+    duration_str = f"{minutes}m {seconds:02d}s"
+
     if passed == total:
         overall = f"✅  {passed}/{total} succeeded"
     elif passed == 0:
         overall = f"❌  0/{total} succeeded"
     else:
         overall = f"⚠️   {passed}/{total} succeeded"
-
-    minutes, seconds = divmod(int(duration.total_seconds()), 60)
-    duration_str = f"{minutes}m {seconds:02d}s"
 
     print(f"\nSYNC COMPLETE  {overall}  —  Duration: {duration_str}")
     if failed:
