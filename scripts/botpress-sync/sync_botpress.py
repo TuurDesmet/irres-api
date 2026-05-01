@@ -224,17 +224,24 @@ def sync_office_images():
 
 def sync_locations():
     """
-    Fetches locations from the IRRES API and stores them in FilterLocationsTable
-    as a SINGLE ROW with two columns:
+    Fetches locations from the IRRES API and stores them in FilterLocationsTable.
 
-      all_locations   (string) - JSON array of all location labels
-                                 e.g. '[{"label":"Gent","value":"Gent"}, ...]'
+    Table structure (2 columns):
+      label (string) - display name of the location group
+                       e.g. "Gent + deelgemeenten"
 
-      location_groups (string) - JSON object mapping label to sub-location array
-                                 e.g. '{"Gent + deelgemeenten":["Gent","Mariakerke",...]}'
+      value (string) - JSON array of all sub-locations belonging to this group
+                       e.g. '["Gent", "Mariakerke", "Drongen", "Wondelgem"]'
 
-    One row is used so the chatbot can load the full dropdown dataset in a
-    single table read without pagination.
+    Each location group gets its OWN ROW so the data stays within
+    Botpress column size limits. Example result in the table:
+
+      | label                  | value                                      |
+      |------------------------|--------------------------------------------|
+      | Gent                   | ["Gent"]                                   |
+      | Gent + deelgemeenten   | ["Gent", "Mariakerke", "Drongen", ...]     |
+      | Zwijnaarde             | ["Zwijnaarde", "Gent Zwijnaarde"]          |
+      | Nazareth - De Pinte    | ["Nazareth-De Pinte", "Nazareth", "Eke"]   |
 
     Aborts without touching Botpress if the API response fails validation.
     """
@@ -261,29 +268,22 @@ def sync_locations():
         return
     print(f"[Locations] OK: Validation passed - {reason}")
 
-    # --- Build the payload ---
-    all_locations_data   = data['data'].get('all_locations', [])
+    # --- Build one row per location group ---
+    # location_groups is a dict: { "label": ["sub1", "sub2", ...], ... }
     location_groups_data = data['data'].get('location_groups', {})
 
-    all_locations_json   = json.dumps(all_locations_data,   ensure_ascii=False)
-    location_groups_json = json.dumps(location_groups_data, ensure_ascii=False)
+    rows = []
+    for label, sub_locations in location_groups_data.items():
+        rows.append({
+            "label": label,
+            "value": json.dumps(sub_locations, ensure_ascii=False)
+        })
 
-    row_payload = {
-        "all_locations":   all_locations_json,
-        "location_groups": location_groups_json
-    }
+    print(f"[Locations] Building {len(rows)} rows (one per location group)...")
+    print(f"[Locations] Column names: ['label', 'value']")
+    print(f"[Locations] Example row : {rows[0] if rows else 'none'}")
 
-    # --- Debug preview so column mismatches are visible in the Actions log ---
-    print(f"[Locations] Payload columns        : {list(row_payload.keys())}")
-    print(f"[Locations] all_locations length   : {len(all_locations_json)} chars "
-          f"({len(all_locations_data)} items)")
-    print(f"[Locations] location_groups length : {len(location_groups_json)} chars "
-          f"({len(location_groups_data)} groups)")
-    print(f"[Locations] First 3 locations      : {all_locations_data[:3]}")
-    print(f"[Locations] First location group   : "
-          f"{next(iter(location_groups_data.items()), ('none', []))}")
-
-    # --- Clear old data and insert the single fresh row ---
+    # --- Clear old data and insert fresh rows ---
     delete_table_rows("FilterLocationsTable")
 
     try:
@@ -292,11 +292,11 @@ def sync_locations():
         res = requests.post(
             insert_url,
             headers=HEADERS,
-            json={"rows": [row_payload]},
+            json={"rows": rows},
             timeout=BOTPRESS_TIMEOUT
         )
         res.raise_for_status()
-        print("[Locations] OK: Inserted 1 row with all locations and location groups.")
+        print(f"[Locations] OK: Inserted {len(rows)} location group(s) successfully.")
     except requests.exceptions.HTTPError as e:
         print(f"[Locations] ERROR: Failed to insert locations: {e}")
         print(f"[Locations] ERROR: Status code  : {e.response.status_code}")
