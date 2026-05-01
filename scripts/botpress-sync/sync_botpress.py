@@ -28,6 +28,32 @@ LISTINGS_TIMEOUT = (15, 450)   # /api/listings is slow: visits every detail page
 FAST_API_TIMEOUT = (15, 90)    # /api/office-images and /api/locations are fast
 BOTPRESS_TIMEOUT = (10, 30)    # Botpress Cloud is always fast
 
+# === DISPLAY HELPERS ===
+
+W = 50  # Line width for separators
+
+def line():
+    print("=" * W)
+
+def divider():
+    print("-" * W)
+
+def step(label, ok, detail=""):
+    status = "✅" if ok else "❌"
+    print(f"  {label:<20} {status}  {detail}")
+
+def step_skip(label, reason="Skipped"):
+    print(f"  {label:<20} ⏭️   {reason}")
+
+def section_header(title):
+    print(f"\n{title}")
+
+def section_result(ok):
+    status = "✅  SUCCESS" if ok else "❌  FAILED"
+    divider()
+    print(f"  {'Result':<20} {status}")
+    line()
+
 
 # === VALIDATION HELPERS ===
 
@@ -46,7 +72,7 @@ def validate_listings_data(data):
             return False, f"Item at index {i} is missing 'listing_id'."
         if not item.get('listing_url'):
             return False, f"Item at index {i} is missing 'listing_url'."
-    return True, f"{len(listings)} valid listing(s) found."
+    return True, f"{len(listings)} listings found"
 
 
 def validate_office_images_data(data):
@@ -58,7 +84,7 @@ def validate_office_images_data(data):
     valid_entries = {k: v for k, v in images.items() if isinstance(v, str) and v.strip()}
     if len(valid_entries) == 0:
         return False, "All image entries are empty or missing URLs."
-    return True, f"{len(valid_entries)} valid office image(s) found."
+    return True, f"{len(valid_entries)} images found"
 
 
 def validate_locations_data(data):
@@ -73,7 +99,7 @@ def validate_locations_data(data):
     location_groups = inner.get('location_groups')
     if not location_groups or not isinstance(location_groups, dict) or len(location_groups) == 0:
         return False, "'location_groups' is missing or empty."
-    return True, f"{len(all_locations)} location(s) across {len(location_groups)} group(s) found."
+    return True, f"{len(all_locations)} locations across {len(location_groups)} groups"
 
 
 # === BOTPRESS TABLE HELPERS ===
@@ -81,10 +107,8 @@ def validate_locations_data(data):
 def delete_table_rows(table_name):
     """
     Deletes all rows from a Botpress table.
-    Only called after successful data validation so we never wipe a table
-    and then fail to repopulate it.
+    Returns (success: bool, detail: str).
     """
-    print(f"  Clearing table '{table_name}'...")
     url = f"https://api.botpress.cloud/v1/tables/{table_name}/rows/delete"
     try:
         res = requests.post(
@@ -94,13 +118,11 @@ def delete_table_rows(table_name):
             timeout=BOTPRESS_TIMEOUT
         )
         res.raise_for_status()
-        print(f"  Table '{table_name}' cleared successfully.")
+        return True, f"{table_name} cleared"
     except requests.exceptions.HTTPError as err:
-        print(f"  Warning: Could not clear table '{table_name}': {err}")
-        print(f"  Response body: {err.response.text}")
+        return False, f"HTTP {err.response.status_code}: {err.response.text}"
     except Exception as e:
-        print(f"  Error clearing table '{table_name}': {e}")
-        raise
+        return False, str(e)
 
 
 # === SYNC FUNCTIONS ===
@@ -108,31 +130,54 @@ def delete_table_rows(table_name):
 def sync_listings():
     """
     Fetches all listings from the IRRES API and inserts them into ListingsTable.
-    Aborts without touching Botpress if the API response fails validation.
+    Returns True if fully successful, False otherwise.
     """
-    print("\n[Listings] Fetching data from API...")
+    section_header("LISTINGS")
+
+    # --- Check API key ---
     if not IRRES_API_KEY:
-        print("[Listings] ERROR: IRRES_API_KEY / API_KEY is not set.")
-        print("[Listings] Botpress table was NOT modified.")
-        return
+        step("Fetch API",     False, "IRRES_API_KEY is not set")
+        step_skip("Validate data")
+        step_skip("Clear table")
+        step_skip("Insert data")
+        section_result(False)
+        return False
+
+    # --- Step 1: Fetch ---
     try:
         res = requests.get(LISTINGS_API, headers=IRRES_API_HEADERS, timeout=LISTINGS_TIMEOUT)
         res.raise_for_status()
         data = res.json()
+        fetch_ok = True
+        fetch_detail = f"{len(data.get('listings', []))} listings fetched"
     except Exception as e:
-        print(f"[Listings] ERROR: Failed to fetch listings: {e}")
-        print("[Listings] Botpress table was NOT modified.")
-        return
+        step("Fetch API", False, str(e))
+        step_skip("Validate data", "Skipped (fetch failed)")
+        step_skip("Clear table",   "Skipped (fetch failed)")
+        step_skip("Insert data",   "Skipped (fetch failed)")
+        section_result(False)
+        return False
 
+    step("Fetch API", fetch_ok, fetch_detail)
+
+    # --- Step 2: Validate ---
     is_valid, reason = validate_listings_data(data)
+    step("Validate data", is_valid, reason)
     if not is_valid:
-        print(f"[Listings] ERROR: Validation failed - {reason}")
-        print("[Listings] Botpress table was NOT modified to prevent data loss.")
-        return
-    print(f"[Listings] OK: Validation passed - {reason}")
+        step_skip("Clear table", "Skipped (validation failed)")
+        step_skip("Insert data", "Skipped (validation failed)")
+        section_result(False)
+        return False
 
-    delete_table_rows("ListingsTable")
+    # --- Step 3: Clear table ---
+    clear_ok, clear_detail = delete_table_rows("ListingsTable")
+    step("Clear table", clear_ok, clear_detail)
+    if not clear_ok:
+        step_skip("Insert data", "Skipped (clear failed)")
+        section_result(False)
+        return False
 
+    # --- Step 4: Insert ---
     rows = []
     for l in data['listings']:
         details_json = json.dumps(l.get('details', {}), ensure_ascii=False)
@@ -163,42 +208,69 @@ def sync_listings():
             timeout=BOTPRESS_TIMEOUT
         )
         res.raise_for_status()
-        print(f"[Listings] OK: Inserted {len(rows)} listing(s) successfully.")
+        step("Insert data", True, f"{len(rows)} rows inserted")
+        section_result(True)
+        return True
     except requests.exceptions.HTTPError as e:
-        print(f"[Listings] ERROR: Failed to insert listings: {e}")
-        print(f"[Listings] ERROR: Response body: {e.response.text}")
+        step("Insert data", False, f"HTTP {e.response.status_code}: {e.response.text}")
+        section_result(False)
+        return False
     except Exception as e:
-        print(f"[Listings] ERROR: Failed to insert listings: {e}")
+        step("Insert data", False, str(e))
+        section_result(False)
+        return False
 
 
 def sync_office_images():
     """
     Fetches office images from the IRRES API and inserts them into OfficeImagesTable.
-    Aborts without touching Botpress if the API response fails validation.
+    Returns True if fully successful, False otherwise.
     """
-    print("\n[OfficeImages] Fetching data from API...")
+    section_header("OFFICE IMAGES")
+
+    # --- Check API key ---
     if not IRRES_API_KEY:
-        print("[OfficeImages] ERROR: IRRES_API_KEY / API_KEY is not set.")
-        print("[OfficeImages] Botpress table was NOT modified.")
-        return
+        step("Fetch API",     False, "IRRES_API_KEY is not set")
+        step_skip("Validate data")
+        step_skip("Clear table")
+        step_skip("Insert data")
+        section_result(False)
+        return False
+
+    # --- Step 1: Fetch ---
     try:
         res = requests.get(IMAGES_API, headers=IRRES_API_HEADERS, timeout=FAST_API_TIMEOUT)
         res.raise_for_status()
         data = res.json()
+        fetch_detail = f"{len(data.get('data', {}))} images fetched"
     except Exception as e:
-        print(f"[OfficeImages] ERROR: Failed to fetch office images: {e}")
-        print("[OfficeImages] Botpress table was NOT modified.")
-        return
+        step("Fetch API", False, str(e))
+        step_skip("Validate data", "Skipped (fetch failed)")
+        step_skip("Clear table",   "Skipped (fetch failed)")
+        step_skip("Insert data",   "Skipped (fetch failed)")
+        section_result(False)
+        return False
 
+    step("Fetch API", True, fetch_detail)
+
+    # --- Step 2: Validate ---
     is_valid, reason = validate_office_images_data(data)
+    step("Validate data", is_valid, reason)
     if not is_valid:
-        print(f"[OfficeImages] ERROR: Validation failed - {reason}")
-        print("[OfficeImages] Botpress table was NOT modified to prevent data loss.")
-        return
-    print(f"[OfficeImages] OK: Validation passed - {reason}")
+        step_skip("Clear table", "Skipped (validation failed)")
+        step_skip("Insert data", "Skipped (validation failed)")
+        section_result(False)
+        return False
 
-    delete_table_rows("OfficeImagesTable")
+    # --- Step 3: Clear table ---
+    clear_ok, clear_detail = delete_table_rows("OfficeImagesTable")
+    step("Clear table", clear_ok, clear_detail)
+    if not clear_ok:
+        step_skip("Insert data", "Skipped (clear failed)")
+        section_result(False)
+        return False
 
+    # --- Step 4: Insert ---
     image_rows = []
     for key, url in data['data'].items():
         if isinstance(url, str) and url.strip():
@@ -214,64 +286,76 @@ def sync_office_images():
             timeout=BOTPRESS_TIMEOUT
         )
         res.raise_for_status()
-        print(f"[OfficeImages] OK: Inserted {len(image_rows)} office image(s) successfully.")
+        step("Insert data", True, f"{len(image_rows)} rows inserted")
+        section_result(True)
+        return True
     except requests.exceptions.HTTPError as e:
-        print(f"[OfficeImages] ERROR: Failed to insert office images: {e}")
-        print(f"[OfficeImages] ERROR: Response body: {e.response.text}")
+        step("Insert data", False, f"HTTP {e.response.status_code}: {e.response.text}")
+        section_result(False)
+        return False
     except Exception as e:
-        print(f"[OfficeImages] ERROR: Failed to insert office images: {e}")
+        step("Insert data", False, str(e))
+        section_result(False)
+        return False
 
 
 def sync_locations():
     """
     Fetches locations from the IRRES API and stores them in FilterLocationsTable.
 
-    Table structure (2 columns):
-      label (string) - display name of the location group
-                       e.g. "Gent + deelgemeenten"
+    Each location group gets its own row:
+      label (string) - display name,  e.g. "Gent + deelgemeenten"
+      value (string) - JSON array,    e.g. '["Gent", "Mariakerke", ...]'
 
-      value (string) - JSON array of all sub-locations belonging to this group
-                       e.g. '["Gent", "Mariakerke", "Drongen", "Wondelgem"]'
-
-    Each location group gets its OWN ROW so the data stays within
-    Botpress column size limits. Example result in the table:
-
-      | label                  | value                                      |
-      |------------------------|--------------------------------------------|
-      | Gent                   | ["Gent"]                                   |
-      | Gent + deelgemeenten   | ["Gent", "Mariakerke", "Drongen", ...]     |
-      | Zwijnaarde             | ["Zwijnaarde", "Gent Zwijnaarde"]          |
-      | Nazareth - De Pinte    | ["Nazareth-De Pinte", "Nazareth", "Eke"]   |
-
-    Aborts without touching Botpress if the API response fails validation.
+    Returns True if fully successful, False otherwise.
     """
-    print("\n[Locations] Fetching data from API...")
-    if not IRRES_API_KEY:
-        print("[Locations] ERROR: IRRES_API_KEY / API_KEY is not set.")
-        print("[Locations] Botpress table was NOT modified.")
-        return
+    section_header("LOCATIONS")
 
+    # --- Check API key ---
+    if not IRRES_API_KEY:
+        step("Fetch API",     False, "IRRES_API_KEY is not set")
+        step_skip("Validate data")
+        step_skip("Clear table")
+        step_skip("Insert data")
+        section_result(False)
+        return False
+
+    # --- Step 1: Fetch ---
     try:
         res = requests.get(LOCATIONS_API, headers=IRRES_API_HEADERS, timeout=FAST_API_TIMEOUT)
         res.raise_for_status()
         data = res.json()
+        groups = data.get('data', {}).get('location_groups', {})
+        fetch_detail = f"{len(groups)} location groups fetched"
     except Exception as e:
-        print(f"[Locations] ERROR: Failed to fetch locations: {e}")
-        print("[Locations] Botpress table was NOT modified.")
-        return
+        step("Fetch API", False, str(e))
+        step_skip("Validate data", "Skipped (fetch failed)")
+        step_skip("Clear table",   "Skipped (fetch failed)")
+        step_skip("Insert data",   "Skipped (fetch failed)")
+        section_result(False)
+        return False
 
-    # --- Validate before touching Botpress ---
+    step("Fetch API", True, fetch_detail)
+
+    # --- Step 2: Validate ---
     is_valid, reason = validate_locations_data(data)
+    step("Validate data", is_valid, reason)
     if not is_valid:
-        print(f"[Locations] ERROR: Validation failed - {reason}")
-        print("[Locations] Botpress table was NOT modified to prevent data loss.")
-        return
-    print(f"[Locations] OK: Validation passed - {reason}")
+        step_skip("Clear table", "Skipped (validation failed)")
+        step_skip("Insert data", "Skipped (validation failed)")
+        section_result(False)
+        return False
 
-    # --- Build one row per location group ---
-    # location_groups is a dict: { "label": ["sub1", "sub2", ...], ... }
+    # --- Step 3: Clear table ---
+    clear_ok, clear_detail = delete_table_rows("FilterLocationsTable")
+    step("Clear table", clear_ok, clear_detail)
+    if not clear_ok:
+        step_skip("Insert data", "Skipped (clear failed)")
+        section_result(False)
+        return False
+
+    # --- Step 4: Insert ---
     location_groups_data = data['data'].get('location_groups', {})
-
     rows = []
     for label, sub_locations in location_groups_data.items():
         rows.append({
@@ -279,16 +363,8 @@ def sync_locations():
             "value": json.dumps(sub_locations, ensure_ascii=False)
         })
 
-    print(f"[Locations] Building {len(rows)} rows (one per location group)...")
-    print(f"[Locations] Column names: ['label', 'value']")
-    print(f"[Locations] Example row : {rows[0] if rows else 'none'}")
-
-    # --- Clear old data and insert fresh rows ---
-    delete_table_rows("FilterLocationsTable")
-
     try:
         insert_url = "https://api.botpress.cloud/v1/tables/FilterLocationsTable/rows"
-        print(f"[Locations] POST {insert_url}")
         res = requests.post(
             insert_url,
             headers=HEADERS,
@@ -296,34 +372,55 @@ def sync_locations():
             timeout=BOTPRESS_TIMEOUT
         )
         res.raise_for_status()
-        print(f"[Locations] OK: Inserted {len(rows)} location group(s) successfully.")
+        step("Insert data", True, f"{len(rows)} rows inserted")
+        section_result(True)
+        return True
     except requests.exceptions.HTTPError as e:
-        print(f"[Locations] ERROR: Failed to insert locations: {e}")
-        print(f"[Locations] ERROR: Status code  : {e.response.status_code}")
-        print(f"[Locations] ERROR: Response body: {e.response.text}")
-        print(f"[Locations] ERROR: Request URL  : {e.response.url}")
+        step("Insert data", False, f"HTTP {e.response.status_code}: {e.response.text}")
+        section_result(False)
+        return False
     except Exception as e:
-        print(f"[Locations] ERROR: Failed to insert locations: {e}")
+        step("Insert data", False, str(e))
+        section_result(False)
+        return False
 
 
 # === ENTRY POINT ===
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("   Starting Botpress Sync Process")
-    print(f"   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 50)
-    overall_success = True
-    try:
-        sync_listings()
-        sync_office_images()
-        sync_locations()
-    except Exception as e:
-        print(f"\nERROR: Unexpected error during sync: {e}")
-        overall_success = False
-        sys.exit(1)
+    start_time = datetime.now()
 
-    if overall_success:
-        print("\n" + "=" * 50)
-        print("OK: Sync process completed.")
-        print("=" * 50)
+    line()
+    print(f"   IRRES -> Botpress Sync")
+    print(f"   {start_time.strftime('%Y-%m-%d  %H:%M:%S')}")
+    line()
+
+    results = {
+        "LISTINGS":      sync_listings(),
+        "OFFICE IMAGES": sync_office_images(),
+        "LOCATIONS":     sync_locations(),
+    }
+
+    duration = datetime.now() - start_time
+    total    = len(results)
+    passed   = sum(1 for ok in results.values() if ok)
+    failed   = [name for name, ok in results.items() if not ok]
+
+    # Final summary
+    if passed == total:
+        overall = f"✅  {passed}/{total} succeeded"
+    elif passed == 0:
+        overall = f"❌  0/{total} succeeded"
+    else:
+        overall = f"⚠️   {passed}/{total} succeeded"
+
+    minutes, seconds = divmod(int(duration.total_seconds()), 60)
+    duration_str = f"{minutes}m {seconds:02d}s"
+
+    print(f"\nSYNC COMPLETE  {overall}  —  Duration: {duration_str}")
+    if failed:
+        print(f"Failed: {', '.join(failed)}")
+    line()
+
+    if passed < total:
+        sys.exit(1)
