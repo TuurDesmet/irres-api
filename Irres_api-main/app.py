@@ -23,11 +23,11 @@
 #   BLOCK 9  — Listing Helper: normalize_url()
 #   BLOCK 10 — Listing Helper: extract_listing_id_from_url()
 #   BLOCK 11 — Listing Helper: format_price_string()
-#   BLOCK 12 — Listing Helper: format_details_as_string()
-#   BLOCK 13 — Listing Helper: parse_main_listing_card()
-#   BLOCK 14 — Listing Helper: find_photo_on_element()
-#   BLOCK 15 — Listing Helper: find_landscape_image_from_detail()
-#   BLOCK 16 — Listing Helper: extract_property_details_from_detail_soup()
+#   BLOCK 12 — Listing Helper: parse_main_listing_card()
+#   BLOCK 13 — Listing Helper: find_photo_on_element()
+#   BLOCK 14 — Listing Helper: find_landscape_image_from_detail()
+#   BLOCK 15 — Listing Helper: extract_address_from_detail_soup()
+#   BLOCK 16 — Listing Helper: extract_page_content_from_detail_soup()
 #   BLOCK 17 — Listing Helper: extract_contact_and_email_from_detail()
 #   BLOCK 18 — Listing Helper: fetch_detail_page()
 #   BLOCK 19 — API Endpoint: /api/listings
@@ -943,37 +943,7 @@ def format_price_string(raw):
 
 
 # =============================================================================
-# BLOCK 12 — LISTING HELPER: format_details_as_string()
-# =============================================================================
-
-def format_details_as_string(details_dict):
-    """
-    Serialize a property details dictionary to a semicolon-separated string.
-
-    Only fields with non-empty values are included.
-
-    Example output:
-        'Terrein_oppervlakte: 8073 m²; Bewoonbare_oppervlakte: 264 m²; EPC: A'
-
-    Args:
-        details_dict: Dict mapping detail field names to values.
-
-    Returns:
-        Semicolon-separated string, or '' if dict is empty / all values empty.
-    """
-    if not details_dict:
-        return ""
-
-    parts = []
-    for key, value in details_dict.items():
-        if value and str(value).strip():
-            parts.append(f"{key}: {value}")
-
-    return "; ".join(parts)
-
-
-# =============================================================================
-# BLOCK 13 — LISTING HELPER: parse_main_listing_card()
+# BLOCK 12 — LISTING HELPER: parse_main_listing_card()
 # =============================================================================
 
 def parse_main_listing_card(link):
@@ -1063,7 +1033,7 @@ def parse_main_listing_card(link):
 
 
 # =============================================================================
-# BLOCK 14 — LISTING HELPER: find_photo_on_element()
+# BLOCK 13 — LISTING HELPER: find_photo_on_element()
 # =============================================================================
 
 def find_photo_on_element(el):
@@ -1143,7 +1113,7 @@ def find_photo_on_element(el):
 
 
 # =============================================================================
-# BLOCK 15 — LISTING HELPER: find_landscape_image_from_detail()
+# BLOCK 14 — LISTING HELPER: find_landscape_image_from_detail()
 # =============================================================================
 
 def find_landscape_image_from_detail(soup):
@@ -1215,88 +1185,231 @@ def find_landscape_image_from_detail(soup):
 
 
 # =============================================================================
-# BLOCK 16 — LISTING HELPER: extract_property_details_from_detail_soup()
+# BLOCK 15 — LISTING HELPER: extract_address_from_detail_soup()
 # =============================================================================
 
-def extract_property_details_from_detail_soup(soup):
+def extract_address_from_detail_soup(soup):
     """
-    Extract property specification details from the 'Kenmerken' section of a
-    detail page.
-
-    Looks for <li data-value="..."> elements and maps them to known field names
-    using case-insensitive partial keyword matching on the data-value attribute.
-    The field value is taken from the first <p> inside the <li>, or from the
-    <li>'s own text if no <p> is present.
-
-    Recognised fields and their match keywords:
-      Terrein_oppervlakte   → 'terrein'
-      Bewoonbare_oppervlakte→ 'bewoonbare'
-      Terras_oppervlakte    → 'terras'
-      Orientatie            → 'ori'
-      Slaapkamers           → 'slaap'
-      Badkamers             → 'bad'
-      Bouwjaar              → 'bouw' (and NOT 'reno')
-      Renovatiejaar         → 'reno'
-      EPC                   → 'epc'
-      Beschikbaarheid       → 'beschik'
-
+    Extract the property address from a listing detail page.
+    
+    The address is located in a div structure like:
+    <div class="lg:w-1/2 w-full text-20 leading-6">
+        <p>Leernsesteenweg 181</p>
+        <p>9800 Bachte-Maria-Leerne</p>
+    </div>
+    
     Args:
         soup: BeautifulSoup object of the detail page.
-
+    
     Returns:
-        dict with all ten keys above; values are '' for any field not found.
+        Address string with street on first line, postal code/city on second.
+        Example: "Leernsesteenweg 181\n9800 Bachte-Maria-Leerne"
     """
-    details = {
-        "Terrein_oppervlakte":    "",
-        "Bewoonbare_oppervlakte": "",
-        "Terras_oppervlakte":     "",
-        "Orientatie":             "",
-        "Slaapkamers":            "",
-        "Badkamers":              "",
-        "Bouwjaar":               "",
-        "Renovatiejaar":          "",
-        "EPC":                    "",
-        "Beschikbaarheid":        "",
-    }
-
     try:
-        lis = soup.find_all('li', attrs={'data-value': True})
+        # Look for the address container - it contains the location text
+        # and is usually near the top of the page
+        address_lines = []
+        
+        # Strategy 1: Find div with class containing "lg:w-1/2" that has address-like content
+        containers = soup.find_all('div', class_=re.compile(r'lg:w-1/2'))
+        
+        for container in containers:
+            paragraphs = container.find_all('p', recursive=False, limit=3)
+            
+            # Check if this looks like an address block
+            # (has 2-3 paragraphs, second one starts with digits = postal code)
+            if len(paragraphs) >= 2:
+                first_p = normalize_text(paragraphs[0].get_text())
+                second_p = normalize_text(paragraphs[1].get_text())
+                
+                # Validate: second line should start with postal code (4 digits for Belgium)
+                if second_p and re.match(r'^\d{4}\s', second_p):
+                    address_lines = [first_p, second_p]
+                    break
+        
+        # Strategy 2: Fallback - look for pattern "street number" followed by "postal city"
+        if not address_lines:
+            all_p = soup.find_all('p')
+            for i, p in enumerate(all_p[:-1]):
+                text1 = normalize_text(p.get_text())
+                text2 = normalize_text(all_p[i + 1].get_text())
+                
+                # Check if text2 looks like "9800 City-Name"
+                if text2 and re.match(r'^\d{4}\s+[A-Za-z]', text2):
+                    # Check if text1 looks like a street (has number in it)
+                    if text1 and re.search(r'\d', text1):
+                        address_lines = [text1, text2]
+                        break
+        
+        if address_lines:
+            return '\n'.join(address_lines)
+        
+        return ""
+        
+    except Exception as e:
+        logger.warning(f"Failed to extract address: {e}")
+        return ""
 
-        for li in lis:
-            key   = li.get('data-value', '').strip()
-            p_tag = li.find('p')
-            value = normalize_text(p_tag.get_text() if p_tag else li.get_text())
 
-            if not value:
-                continue
+# =============================================================================
+# BLOCK 16 — LISTING HELPER: extract_page_content_from_detail_soup()
+# =============================================================================
 
-            key_lower = key.lower()
-
-            if 'terrein' in key_lower:
-                details["Terrein_oppervlakte"]    = value
-            elif 'terras' in key_lower:
-                details["Terras_oppervlakte"]     = value
-            elif 'bewoonbare' in key_lower:
-                details["Bewoonbare_oppervlakte"] = value
-            elif 'ori' in key_lower:
-                details["Orientatie"]             = value
-            elif 'slaap' in key_lower:
-                details["Slaapkamers"]            = value
-            elif 'bad' in key_lower:
-                details["Badkamers"]              = value
-            elif 'bouw' in key_lower and 'reno' not in key_lower:
-                details["Bouwjaar"]               = value
-            elif 'reno' in key_lower:
-                details["Renovatiejaar"]          = value
-            elif 'epc' in key_lower:
-                details["EPC"]                    = value
-            elif 'beschik' in key_lower:
-                details["Beschikbaarheid"]        = value
-
-    except Exception:
-        pass   # Return partially-filled dict on any error
-
-    return details
+def extract_page_content_from_detail_soup(soup):
+    """
+    Extract all visible text content from a listing detail page.
+    
+    Includes:
+    - All headings (h1, h2, h3, etc.)
+    - All paragraph text
+    - All list items
+    - Important links (maps, virtual tours, documents) in markdown format
+    
+    Excludes:
+    - Navigation menus
+    - Footer content
+    - Script/style tags
+    - Hidden elements
+    
+    Args:
+        soup: BeautifulSoup object of the detail page.
+    
+    Returns:
+        String containing all visible page content with links preserved.
+    """
+    try:
+        # Focus on main content area
+        main = soup.find('main', attrs={'data-barba': True}) or soup.find('main') or soup
+        
+        content_parts = []
+        
+        # Extract title/heading
+        title = main.find(['h1', 'h2'], class_=re.compile(r'font-serif|text-2xl|xl:text'))
+        if title:
+            content_parts.append(normalize_text(title.get_text()))
+        
+        # Extract address block
+        address_divs = main.find_all('div', class_=re.compile(r'lg:w-1/2'))
+        for div in address_divs:
+            paragraphs = div.find_all('p', recursive=False, limit=3)
+            if len(paragraphs) >= 2:
+                second_p = normalize_text(paragraphs[1].get_text())
+                if second_p and re.match(r'^\d{4}\s', second_p):
+                    # This is the address block
+                    for p in paragraphs[:2]:
+                        content_parts.append(normalize_text(p.get_text()))
+                    break
+        
+        # Extract map link
+        map_link = main.find('a', href=re.compile(r'google\.com/maps'))
+        if map_link:
+            href = map_link.get('href', '')
+            link_text = normalize_text(map_link.get_text()) or 'Toon ligging'
+            content_parts.append(f"[{link_text}]({href})")
+        
+        # Extract virtual tour link
+        virtual_tour = main.find('button', class_='open-iframe') or \
+                      main.find('a', href=re.compile(r'matterport\.com'))
+        if virtual_tour:
+            iframe_src = virtual_tour.get('data-framesrc') or virtual_tour.get('href', '')
+            if iframe_src:
+                content_parts.append(f"Virtueel bezoek: {iframe_src}")
+        
+        # Extract price
+        price_div = main.find('div', class_=re.compile(r'flex items-center text-lg'))
+        if price_div:
+            price_p = price_div.find('p')
+            if price_p:
+                content_parts.append(normalize_text(price_p.get_text()))
+        
+        # Extract "Kenmerken" section
+        kenmerken_section = None
+        for section in main.find_all(['div', 'section'], class_=re.compile(r'bg-dark-black|item-hover-list')):
+            heading = section.find(['h2', 'h3'], string=re.compile(r'Kenmerken', re.I))
+            if heading:
+                kenmerken_section = section
+                break
+        
+        if kenmerken_section:
+            content_parts.append("\nKenmerken\n")
+            items = kenmerken_section.find_all('li', class_='item-hover-text')
+            for item in items:
+                text = normalize_text(item.get_text())
+                if text:
+                    content_parts.append(f"* {text}")
+        
+        # Extract all body text sections (descriptions, features, etc.)
+        body_sections = main.find_all('div', class_=re.compile(r'body|text-18'))
+        for section in body_sections:
+            # Extract headings
+            for heading in section.find_all(['h2', 'h3']):
+                h_text = normalize_text(heading.get_text())
+                if h_text and len(h_text) > 3:  # Skip very short headings
+                    content_parts.append(f"\n{h_text}\n")
+            
+            # Extract paragraphs
+            for p in section.find_all('p', recursive=True):
+                p_text = normalize_text(p.get_text())
+                if p_text and len(p_text) > 10:  # Skip very short paragraphs
+                    content_parts.append(p_text)
+        
+        # Extract "Voorschriften" section
+        voorschriften_section = None
+        for section in main.find_all('div', class_=re.compile(r'bg-dark-black|bg-white')):
+            heading = section.find('h2', string=re.compile(r'Voorschriften', re.I))
+            if heading:
+                voorschriften_section = section
+                break
+        
+        if voorschriften_section:
+            content_parts.append("\nVoorschriften\n")
+            items = voorschriften_section.find_all('li', class_='pb-4')
+            for item in items:
+                # Get label
+                label = item.find('p', class_='font-bold')
+                if label:
+                    label_text = normalize_text(label.get_text())
+                    
+                    # Get value(s)
+                    value_p = item.find('p', class_=re.compile(r'lg:w-3/5'))
+                    if value_p:
+                        value_text = normalize_text(value_p.get_text())
+                        content_parts.append(f"* {label_text}: {value_text}")
+                    else:
+                        # Check for list of values
+                        value_ul = item.find('ul', class_=re.compile(r'lg:w-3/5'))
+                        if value_ul:
+                            values = [normalize_text(li.get_text()) for li in value_ul.find_all('li')]
+                            content_parts.append(f"* {label_text}: {', '.join(values)}")
+        
+        # Extract "Dossierstukken" section (document links)
+        dossierstukken_section = None
+        for section in main.find_all('div', class_=re.compile(r'bg-white|xl:w-5/6')):
+            heading = section.find('h2', string=re.compile(r'Dossierstukken', re.I))
+            if heading:
+                dossierstukken_section = section
+                break
+        
+        if dossierstukken_section:
+            content_parts.append("\nDossierstukken\n")
+            doc_links = dossierstukken_section.find_all('a', href=re.compile(r'\.pdf$', re.I))
+            for link in doc_links:
+                href = normalize_url(link.get('href', ''))
+                link_text = normalize_text(link.find('p').get_text() if link.find('p') else link.get_text())
+                if href and link_text:
+                    content_parts.append(f"* [{link_text}]({href})")
+        
+        # Clean up and join
+        result = '\n'.join(content_parts)
+        
+        # Remove excessive newlines
+        result = re.sub(r'\n{3,}', '\n\n', result)
+        
+        return result.strip()
+        
+    except Exception as e:
+        logger.warning(f"Failed to extract page content: {e}")
+        return ""
 
 
 # =============================================================================
@@ -1409,13 +1522,14 @@ def get_listings():
                     "location"    : "<str>",
                     "description" : "<str>",
                     "listing_type": "<str>",
+                    "address"     : "<str>",           # NEW
+                    "page_content": "<str>",           # NEW
                     "Title"       : "<str>",
                     "Button1_Label": "Bekijk het op onze website",
                     "Button2_Label": "<str>",
                     "Button2_email": "<str>",
                     "Button3_Label": "<str>",
                     "Button3_Value": "<str>",
-                    "details"     : "<str>"
                 },
                 ...
             ]
@@ -1477,28 +1591,18 @@ def get_listings():
             photo_url = parsed['photo_candidate'] or ""
 
             # ----------------------------------------------------------------
-            # Fetch detail page for contact info and property specifications
+            # Fetch detail page for NEW FIELDS: address and page_content
             # ----------------------------------------------------------------
             time.sleep(0.09)   # Polite crawl delay — don't hammer IRRES.be
             detail_soup = fetch_detail_page(listing_url)
 
             button2_label = ""
             button2_email = ""
-            details       = {
-                "Terrein_oppervlakte":    "",
-                "Bewoonbare_oppervlakte": "",
-                "Terras_oppervlakte":     "",
-                "Orientatie":             "",
-                "Slaapkamers":            "",
-                "Badkamers":              "",
-                "Bouwjaar":               "",
-                "Renovatiejaar":          "",
-                "EPC":                    "",
-                "Beschikbaarheid":        "",
-            }
+            address = ""           # NEW
+            page_content = ""      # NEW
 
             if detail_soup:
-                # Contact info
+                # Contact info (existing logic)
                 first_name, email = extract_contact_and_email_from_detail(detail_soup)
                 if email:
                     button2_email = f"mailto:{email}"
@@ -1508,11 +1612,11 @@ def get_listings():
                     )
                     button2_label = f"Contacteer {name_label} - Irres"
 
-                # Property specifications
-                details_found = extract_property_details_from_detail_soup(detail_soup)
-                for k in details.keys():
-                    if details_found.get(k):
-                        details[k] = details_found[k]
+                # NEW: Extract address
+                address = extract_address_from_detail_soup(detail_soup)
+                
+                # NEW: Extract full page content
+                page_content = extract_page_content_from_detail_soup(detail_soup)
 
                 # Fallback photo from detail page if card had none
                 if not photo_url:
@@ -1557,8 +1661,6 @@ def get_listings():
                 else ""
             )
 
-            details_string = format_details_as_string(details)
-
             listing_obj = {
                 "listing_id":    listing_id,
                 "listing_url":   listing_url,
@@ -1567,13 +1669,14 @@ def get_listings():
                 "location":      parsed_location,
                 "description":   parsed.get('description') or "",
                 "listing_type":  lt_mapped,
+                "address":       address,           # NEW
+                "page_content":  page_content,      # NEW
                 "Title":         Title,
                 "Button1_Label": "Bekijk het op onze website",
                 "Button2_Label": button2_label,
                 "Button2_email": button2_email,
                 "Button3_Label": button3_label,
                 "Button3_Value": button3_value,
-                "details":       details_string,
             }
 
             # Only include listings that have at least some meaningful content
@@ -1784,11 +1887,11 @@ def root():
     """
     return jsonify({
         "api":     "IRRES.be Unified Scraper",
-        "version": "7.0",
+        "version": "8.0",
         "endpoints": {
             "/api/listings": (
                 "Scrape all active property listings with contact info and "
-                "property details. Expensive — allow 3–8 minutes."
+                "full page content. Expensive — allow 3–8 minutes."
             ),
             "/api/locations": (
                 "Get all filter locations and sub-location groups. "
