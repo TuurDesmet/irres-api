@@ -3,19 +3,30 @@ import json
 import os
 import sys
 import time
+import logging
 from datetime import datetime
+from typing import Dict, List, Tuple, Any, Optional
 
-# === CONFIGURATION ===
+# =============================================================================
+# BLOCK 1: CONFIGURATION & ENVIRONMENT
+# =============================================================================
+
+# Botpress Credentials
 BOT_ID = os.getenv("BOT_ID")
 TOKEN = os.getenv("BOTPRESS_TOKEN")
+
+# IRRES API Credentials
+# Note: Render.com deployments often use 'API_KEY' or 'IRRES_API_KEY'
 IRRES_API_KEY = os.getenv("IRRES_API_KEY") or os.getenv("API_KEY")
 
+# Endpoint Definitions
 BASE_API       = "https://irres-api.onrender.com/api"
 HEALTH_URL     = "https://irres-api.onrender.com/health"
 LISTINGS_API   = f"{BASE_API}/listings"
 IMAGES_API     = f"{BASE_API}/office-images"
 LOCATIONS_API  = f"{BASE_API}/locations"
 
+# Authentication Headers
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
     "x-bot-id": BOT_ID,
@@ -24,136 +35,210 @@ HEADERS = {
 
 IRRES_API_HEADERS = {"X-API-KEY": IRRES_API_KEY} if IRRES_API_KEY else {}
 
-# === TIMEOUT CONFIGURATION ===
-# (connect_seconds, read_seconds)
-LISTINGS_TIMEOUT  = (15, 450)  # /api/listings visits every detail page — slow by design
-FAST_API_TIMEOUT  = (15, 90)   # /api/office-images and /api/locations are fast
-BOTPRESS_TIMEOUT  = (10, 30)   # Botpress Cloud is always fast
-HEALTH_TIMEOUT    = (10, 15)   # Quick ping to wake up the server
+# Table Name Definitions
+TABLE_LISTINGS  = "ListingsTable"
+TABLE_IMAGES    = "OfficeImagesTable"
+TABLE_LOCATIONS = "FilterLocationsTable"
 
-# === WAKE-UP & RETRY CONFIGURATION ===
-WAKE_UP_MAX_WAIT    = 90   # Max seconds to wait for the server to come online
-WAKE_UP_INTERVAL    = 5    # Seconds between each health check ping
-LISTINGS_MAX_RETRY  = 3    # Number of times to retry /api/listings on failure
-LISTINGS_RETRY_WAIT = 30   # Seconds to wait between each retry
+# =============================================================================
+# BLOCK 2: TIMEOUT & RETRY SETTINGS
+# =============================================================================
 
-# === DISPLAY HELPERS ===
+# Timeouts: (Connection Timeout, Read Timeout) in seconds
+# /api/listings is slow as it visits every detail page (3-8 minutes expected)
+TIMEOUT_LISTINGS = (20, 480)
+TIMEOUT_FAST     = (15, 90)
+TIMEOUT_BOTPRESS = (10, 30)
+TIMEOUT_HEALTH   = (10, 15)
 
-W = 50  # Line width for separators
+# Wait/Retry configuration for Render.com free tier
+WAKE_UP_MAX_WAIT    = 120   # Seconds to wait for server to wake up
+WAKE_UP_INTERVAL    = 5     # Delay between health pings
+LISTINGS_MAX_RETRY  = 3     # Retry count for the scraping endpoint
+LISTINGS_RETRY_WAIT = 30    # Delay between retries on 5xx errors
+
+# =============================================================================
+# BLOCK 3: LOGGING & UI HELPERS
+# =============================================================================
+
+# Configure system logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("SyncEngine")
+
+# Console display width
+W = 60
 
 def line():
+    """Prints a double horizontal separator."""
     print("=" * W)
 
 def divider():
+    """Prints a single horizontal separator."""
     print("-" * W)
 
-def step(label, ok, detail=""):
+def step(label: str, ok: bool, detail: str = ""):
+    """
+    Prints a status line for a specific sync step.
+    
+    Args:
+        label: The name of the step.
+        ok: Whether the step succeeded.
+        detail: Additional information or error message.
+    """
     status = "✅" if ok else "❌"
-    print(f"  {label:<22} {status}  {detail}")
+    print(f"  {label:<25} {status}  {detail}")
 
-def step_warn(label, detail=""):
-    print(f"  {label:<22} ⚠️   {detail}")
+def step_warn(label: str, detail: str = ""):
+    """Prints a warning status line."""
+    print(f"  {label:<25} ⚠️   {detail}")
 
-def step_skip(label, reason="Skipped"):
-    print(f"  {label:<22} ⏭️   {reason}")
+def step_skip(label: str, reason: str = "Skipped"):
+    """Prints a skipped status line."""
+    print(f"  {label:<25} ⏭️   {reason}")
 
-def section_header(title):
-    print(f"\n{title}")
-
-def section_result(ok):
-    status = "✅  SUCCESS" if ok else "❌  FAILED"
+def section_header(title: str):
+    """Prints a formatted header for a sync section."""
+    print(f"\n[ {title} ]")
     divider()
-    print(f"  {'Result':<22} {status}")
+
+def section_result(ok: bool):
+    """Prints the final result status for a section."""
+    status = "SUCCESS" if ok else "FAILED"
+    icon = "✅" if ok else "❌"
+    divider()
+    print(f"  {'Overall Result':<25} {icon}  {status}")
     line()
 
+# =============================================================================
+# BLOCK 4: PRE-FLIGHT CHECKS
+# =============================================================================
 
-# === WAKE-UP HELPER ===
-
-def wait_for_server():
+def run_preflight_checks() -> bool:
     """
-    Pings the /health endpoint repeatedly until the server responds with HTTP 200.
-
-    Render.com free-tier servers spin down after inactivity and need 30-50
-    seconds to cold-start. Sending a lightweight /health ping first wakes the
-    server up without triggering the expensive /api/listings scrape.
-
+    Verifies that all required environment variables are set.
+    
     Returns:
-        (True, elapsed_seconds)  if server came online within WAKE_UP_MAX_WAIT
-        (False, elapsed_seconds) if server did not respond in time
+        True if all checks pass, False otherwise.
+    """
+    section_header("PRE-FLIGHT CHECKS")
+    checks = {
+        "BOT_ID": bool(BOT_ID),
+        "BOTPRESS_TOKEN": bool(TOKEN),
+        "IRRES_API_KEY": bool(IRRES_API_KEY)
+    }
+    
+    all_pass = True
+    for var, exists in checks.items():
+        step(f"Check {var}", exists, "Found" if exists else "MISSING")
+        if not exists:
+            all_pass = False
+            
+    section_result(all_pass)
+    return all_pass
+
+# =============================================================================
+# BLOCK 5: SERVER MANAGEMENT
+# =============================================================================
+
+def wait_for_server() -> Tuple[bool, int]:
+    """
+    Pings the /health endpoint repeatedly to wake up the Render.com server.
+    
+    Free tier Render instances spin down after inactivity. This function
+    ensures the server is 'warm' before we send an expensive scraping request.
+    
+    Returns:
+        (Success Boolean, Elapsed Seconds)
     """
     start = time.time()
-    attempt = 0
-
+    
     while True:
         elapsed = int(time.time() - start)
-        attempt += 1
-
+        
         try:
-            res = requests.get(HEALTH_URL, headers=IRRES_API_HEADERS, timeout=HEALTH_TIMEOUT)
+            res = requests.get(
+                HEALTH_URL, 
+                headers=IRRES_API_HEADERS, 
+                timeout=TIMEOUT_HEALTH
+            )
             if res.status_code == 200:
                 return True, elapsed
         except Exception:
-            pass  # Server not yet awake — keep trying
-
+            pass  # Expected if server is booting
+            
         if elapsed >= WAKE_UP_MAX_WAIT:
             return False, elapsed
-
+            
         time.sleep(WAKE_UP_INTERVAL)
 
+# =============================================================================
+# BLOCK 6: VALIDATION LOGIC
+# =============================================================================
 
-# === VALIDATION HELPERS ===
-
-def validate_listings_data(data):
-    if not isinstance(data, dict):
-        return False, "Response is not a JSON object."
-    if not data.get('success'):
-        return False, "API returned success=False."
-    listings = data.get('listings')
-    if not listings or not isinstance(listings, list):
-        return False, "No listings array found in response."
-    if len(listings) == 0:
-        return False, "Listings array is empty."
-    for i, item in enumerate(listings):
-        if not item.get('listing_id'):
-            return False, f"Item at index {i} is missing 'listing_id'."
-        if not item.get('listing_url'):
-            return False, f"Item at index {i} is missing 'listing_url'."
-    return True, f"{len(listings)} listings found"
-
-
-def validate_office_images_data(data):
-    if not isinstance(data, dict):
-        return False, "Response is not a JSON object."
-    images = data.get('data')
-    if not images or not isinstance(images, dict):
-        return False, "No 'data' dict found in response."
-    valid_entries = {k: v for k, v in images.items() if isinstance(v, str) and v.strip()}
-    if len(valid_entries) == 0:
-        return False, "All image entries are empty or missing URLs."
-    return True, f"{len(valid_entries)} images found"
-
-
-def validate_locations_data(data):
-    if not isinstance(data, dict):
-        return False, "Response is not a JSON object."
-    inner = data.get('data')
-    if not inner or not isinstance(inner, dict):
-        return False, "No 'data' object found in response."
-    all_locations = inner.get('all_locations')
-    if not all_locations or not isinstance(all_locations, list) or len(all_locations) == 0:
-        return False, "'all_locations' is missing or empty."
-    location_groups = inner.get('location_groups')
-    if not location_groups or not isinstance(location_groups, dict) or len(location_groups) == 0:
-        return False, "'location_groups' is missing or empty."
-    return True, f"{len(all_locations)} locations across {len(location_groups)} groups"
-
-
-# === BOTPRESS TABLE HELPERS ===
-
-def delete_table_rows(table_name):
+def validate_listings_payload(data: Any) -> Tuple[bool, str]:
     """
-    Deletes all rows from a Botpress table.
-    Returns (success: bool, detail: str).
+    Validates the structure of the listings API response.
+    
+    Args:
+        data: The decoded JSON response.
+        
+    Returns:
+        (IsValid, ErrorMessage/SuccessMessage)
+    """
+    if not isinstance(data, dict):
+        return False, "Payload is not a JSON object"
+        
+    if not data.get('success'):
+        return False, f"API success flag is False: {data.get('error', 'No msg')}"
+        
+    listings = data.get('listings')
+    if not isinstance(listings, list):
+        return False, "Field 'listings' is missing or not an array"
+        
+    if not listings:
+        return False, "Listings array is empty"
+        
+    # Check first item for essential keys
+    sample = listings[0]
+    required = ['listing_id', 'listing_url']
+    for key in required:
+        if key not in sample:
+            return False, f"Missing key '{key}' in listing data"
+            
+    return True, f"Found {len(listings)} valid entries"
+
+def validate_image_payload(data: Any) -> Tuple[bool, str]:
+    """Validates the office images API response."""
+    if not isinstance(data, dict) or 'data' not in data:
+        return False, "Missing 'data' wrapper"
+    return True, "Valid image map"
+
+def validate_location_payload(data: Any) -> Tuple[bool, str]:
+    """Validates the locations API response."""
+    if not isinstance(data, dict) or 'data' not in data:
+        return False, "Missing 'data' wrapper"
+    inner = data.get('data')
+    if 'all_locations' not in inner or 'location_groups' not in inner:
+        return False, "Missing location data structures"
+    return True, "Valid location structure"
+
+# =============================================================================
+# BLOCK 7: BOTPRESS TABLE OPERATIONS
+# =============================================================================
+
+def clear_botpress_table(table_name: str) -> Tuple[bool, str]:
+    """
+    Deletes all existing rows from a specific Botpress table.
+    
+    Args:
+        table_name: The table to empty.
+        
+    Returns:
+        (Success, Detail)
     """
     url = f"https://api.botpress.cloud/v1/tables/{table_name}/rows/delete"
     try:
@@ -161,356 +246,267 @@ def delete_table_rows(table_name):
             url,
             headers=HEADERS,
             json={"deleteAllRows": True},
-            timeout=BOTPRESS_TIMEOUT
+            timeout=TIMEOUT_BOTPRESS
         )
         res.raise_for_status()
-        return True, f"{table_name} cleared"
+        return True, "Table cleared"
     except requests.exceptions.HTTPError as err:
         return False, f"HTTP {err.response.status_code}: {err.response.text}"
     except Exception as e:
         return False, str(e)
 
-
-# === SYNC FUNCTIONS ===
-
-def sync_listings():
+def insert_botpress_rows(table_name: str, rows: List[Dict]) -> Tuple[bool, str]:
     """
-    Syncs listings to ListingsTable.
-
-    Flow:
-      1. Wake up the Render.com server via /health ping.
-      2. Fetch /api/listings with automatic retry on failure.
-      3. Validate the response.
-      4. Clear ListingsTable.
-      5. Insert fresh rows.
-
-    Returns True if fully successful, False otherwise.
+    Uploads a batch of rows to a Botpress table.
+    
+    Args:
+        table_name: Target table.
+        rows: List of dictionary records.
+        
+    Returns:
+        (Success, Detail)
     """
-    section_header("LISTINGS")
+    url = f"https://api.botpress.cloud/v1/tables/{table_name}/rows"
+    try:
+        # Botpress handles batching internally if the list is reasonably sized
+        res = requests.post(
+            url,
+            headers=HEADERS,
+            json={"rows": rows},
+            timeout=TIMEOUT_BOTPRESS
+        )
+        res.raise_for_status()
+        return True, f"{len(rows)} records inserted"
+    except requests.exceptions.HTTPError as err:
+        return False, f"HTTP {err.response.status_code}: {err.response.text}"
+    except Exception as e:
+        return False, str(e)
 
-    # --- Check API key ---
-    if not IRRES_API_KEY:
-        step("Wake up server", False, "IRRES_API_KEY is not set")
-        step_skip("Fetch API")
-        step_skip("Validate data")
-        step_skip("Clear table")
-        step_skip("Insert data")
+# =============================================================================
+# BLOCK 8: CORE SYNCHRONIZATION LOGIC
+# =============================================================================
+
+def sync_listings() -> bool:
+    """
+    Executes the full listing synchronization pipeline.
+    
+    Steps:
+    1. Wake up server
+    2. Fetch /api/listings (with retry)
+    3. Validate
+    4. Transform data (adding address and page_content)
+    5. Clear table
+    6. Insert new data
+    
+    Returns:
+        True if the entire section succeeded.
+    """
+    section_header("SYNC: PROPERTY LISTINGS")
+    
+    # 1. Wake up
+    print(f"  {'Wake up server':<25} ⏳  Pinging...")
+    online, seconds = wait_for_server()
+    step("Wake up server", online, f"Online in {seconds}s" if online else "TIMEOUT")
+    if not online: 
         section_result(False)
         return False
 
-    # --- Step 1: Wake up server ---
-    # Render.com free tier spins down after inactivity.
-    # We ping /health repeatedly until the server responds, BEFORE hitting
-    # the expensive /api/listings endpoint.
-    print(f"  {'Wake up server':<22} ⏳  Pinging server (max {WAKE_UP_MAX_WAIT}s)...")
-    server_ok, elapsed = wait_for_server()
-    step("Wake up server", server_ok, f"Server online in {elapsed}s" if server_ok else f"No response after {elapsed}s")
-
-    if not server_ok:
-        step_skip("Fetch API",     "Skipped (server offline)")
-        step_skip("Validate data", "Skipped (server offline)")
-        step_skip("Clear table",   "Skipped (server offline)")
-        step_skip("Insert data",   "Skipped (server offline)")
-        section_result(False)
-        return False
-
-    # --- Step 2: Fetch with retry ---
-    # /api/listings scrapes every detail page one by one — it can still fail
-    # on the first attempt if the server just woke up and isn't fully ready.
-    # We retry up to LISTINGS_MAX_RETRY times with a wait between each attempt.
-    data = None
-    fetch_error = None
-
+    # 2. Fetch Data
+    api_data = None
+    fetch_error = ""
     for attempt in range(1, LISTINGS_MAX_RETRY + 1):
         try:
-            res = requests.get(LISTINGS_API, headers=IRRES_API_HEADERS, timeout=LISTINGS_TIMEOUT)
+            res = requests.get(
+                LISTINGS_API, 
+                headers=IRRES_API_HEADERS, 
+                timeout=TIMEOUT_LISTINGS
+            )
             res.raise_for_status()
-            data = res.json()
-            fetch_error = None
-            break  # Success — stop retrying
+            api_data = res.json()
+            break
         except Exception as e:
             fetch_error = str(e)
             if attempt < LISTINGS_MAX_RETRY:
-                step_warn(
-                    "Fetch API",
-                    f"Attempt {attempt}/{LISTINGS_MAX_RETRY} failed — retrying in {LISTINGS_RETRY_WAIT}s"
-                )
+                step_warn("Fetch API", f"Attempt {attempt} failed, retrying...")
                 time.sleep(LISTINGS_RETRY_WAIT)
 
-    if data is None:
-        step("Fetch API", False, f"All {LISTINGS_MAX_RETRY} attempts failed: {fetch_error}")
-        step_skip("Validate data", "Skipped (fetch failed)")
-        step_skip("Clear table",   "Skipped (fetch failed)")
-        step_skip("Insert data",   "Skipped (fetch failed)")
+    if not api_data:
+        step("Fetch API", False, f"Failed after {LISTINGS_MAX_RETRY} attempts: {fetch_error}")
+        section_result(False)
+        return False
+    
+    step("Fetch API", True, f"Received {len(api_data.get('listings', []))} items")
+
+    # 3. Validate
+    valid, msg = validate_listings_payload(api_data)
+    step("Validate data", valid, msg)
+    if not valid:
         section_result(False)
         return False
 
-    attempt_label = f"{len(data.get('listings', []))} listings fetched"
-    if attempt > 1:
-        attempt_label += f" (attempt {attempt}/{LISTINGS_MAX_RETRY})"
-    step("Fetch API", True, attempt_label)
-
-    # --- Step 3: Validate ---
-    is_valid, reason = validate_listings_data(data)
-    step("Validate data", is_valid, reason)
-    if not is_valid:
-        step_skip("Clear table", "Skipped (validation failed)")
-        step_skip("Insert data", "Skipped (validation failed)")
-        section_result(False)
-        return False
-
-    # --- Step 4: Clear table ---
-    clear_ok, clear_detail = delete_table_rows("ListingsTable")
-    step("Clear table", clear_ok, clear_detail)
-    if not clear_ok:
-        step_skip("Insert data", "Skipped (clear failed)")
-        section_result(False)
-        return False
-
-    # --- Step 5: Insert ---
+    # 4. Transform & Build Rows
+    # This block maps API keys to Botpress table columns
     rows = []
-    for l in data['listings']:
-        details_json = json.dumps(l.get('details', {}), ensure_ascii=False)
+    timestamp = datetime.now().isoformat()
+    
+    for item in api_data['listings']:
         rows.append({
-            "listing_id":    l.get('listing_id'),
-            "listing_url":   l.get('listing_url'),
-            "photo_url":     l.get('photo_url'),
-            "price":         l.get('price'),
-            "location":      l.get('location'),
-            "description":   l.get('description'),
-            "listing_type":  l.get('listing_type'),
-            "Title":         l.get('Title', ""),
-            "Button1_Label": l.get('Button1_Label', "Bekijk het op onze website"),
-            "Button2_Label": l.get('Button2_Label', ""),
-            "Button2_email": l.get('Button2_email', ""),
-            "Button3_Label": l.get('Button3_Label'),
-            "Button3_Value": l.get('Button3_Value'),
-            "details":       details_json,
-            "last_updated":  datetime.now().isoformat()
+            "listing_id":    item.get("listing_id", ""),
+            "listing_url":   item.get("listing_url", ""),
+            "photo_url":     item.get("photo_url", ""),
+            "price":         item.get("price", ""),
+            "location":      item.get("location", ""),
+            "description":   item.get("description", ""),
+            "listing_type":  item.get("listing_type", ""),
+            "address":       item.get("address", ""),       # Syncing new field
+            "page_content":  item.get("page_content", ""),  # Syncing new field
+            "Title":         item.get("Title", ""),
+            "Button1_Label": item.get("Button1_Label", "Bekijk het op onze website"),
+            "Button2_Label": item.get("Button2_Label", ""),
+            "Button2_email": item.get("Button2_email", ""),
+            "Button3_Label": item.get("Button3_Label", ""),
+            "Button3_Value": item.get("Button3_Value", ""),
+            "last_updated":  timestamp
         })
+    step("Transform data", True, "Mapping complete")
 
+    # 5. Clear Table
+    cleared, c_msg = clear_botpress_table(TABLE_LISTINGS)
+    step("Clear table", cleared, c_msg)
+    if not cleared:
+        section_result(False)
+        return False
+
+    # 6. Insert Data
+    inserted, i_msg = insert_botpress_rows(TABLE_LISTINGS, rows)
+    step("Insert data", inserted, i_msg)
+    
+    section_result(inserted)
+    return inserted
+
+def sync_office_images() -> bool:
+    """Synchronizes office building photos to OfficeImagesTable."""
+    section_header("SYNC: OFFICE IMAGES")
+    
     try:
-        insert_url = "https://api.botpress.cloud/v1/tables/ListingsTable/rows"
-        res = requests.post(
-            insert_url,
-            headers=HEADERS,
-            json={"rows": rows},
-            timeout=BOTPRESS_TIMEOUT
-        )
-        res.raise_for_status()
-        step("Insert data", True, f"{len(rows)} rows inserted")
-        section_result(True)
-        return True
-    except requests.exceptions.HTTPError as e:
-        step("Insert data", False, f"HTTP {e.response.status_code}: {e.response.text}")
-        section_result(False)
-        return False
-    except Exception as e:
-        step("Insert data", False, str(e))
-        section_result(False)
-        return False
-
-
-def sync_office_images():
-    """
-    Syncs office images to OfficeImagesTable.
-    Server is already awake after sync_listings() so no wake-up needed.
-    Returns True if fully successful, False otherwise.
-    """
-    section_header("OFFICE IMAGES")
-
-    # --- Check API key ---
-    if not IRRES_API_KEY:
-        step("Fetch API",     False, "IRRES_API_KEY is not set")
-        step_skip("Validate data")
-        step_skip("Clear table")
-        step_skip("Insert data")
-        section_result(False)
-        return False
-
-    # --- Step 1: Fetch ---
-    try:
-        res = requests.get(IMAGES_API, headers=IRRES_API_HEADERS, timeout=FAST_API_TIMEOUT)
+        res = requests.get(IMAGES_API, headers=IRRES_API_HEADERS, timeout=TIMEOUT_FAST)
         res.raise_for_status()
         data = res.json()
-        fetch_detail = f"{len(data.get('data', {}))} images fetched"
+        
+        valid, msg = validate_image_payload(data)
+        step("Fetch & Validate", valid, msg)
+        if not valid: return False
+        
+        # Mapping to table format: {office_name, image_url}
+        image_map = data['data']
+        rows = []
+        for key, url in image_map.items():
+            if url:
+                # Clean name: IrresGentImage -> Gent
+                name = key.replace("Irres", "").replace("Image", "")
+                rows.append({"office_name": name, "image_url": url})
+        
+        clear_botpress_table(TABLE_IMAGES)
+        ok, msg = insert_botpress_rows(TABLE_IMAGES, rows)
+        step("Insert data", ok, msg)
+        
+        section_result(ok)
+        return ok
     except Exception as e:
-        step("Fetch API", False, str(e))
-        step_skip("Validate data", "Skipped (fetch failed)")
-        step_skip("Clear table",   "Skipped (fetch failed)")
-        step_skip("Insert data",   "Skipped (fetch failed)")
+        step("Sync Error", False, str(e))
         section_result(False)
         return False
 
-    step("Fetch API", True, fetch_detail)
-
-    # --- Step 2: Validate ---
-    is_valid, reason = validate_office_images_data(data)
-    step("Validate data", is_valid, reason)
-    if not is_valid:
-        step_skip("Clear table", "Skipped (validation failed)")
-        step_skip("Insert data", "Skipped (validation failed)")
-        section_result(False)
-        return False
-
-    # --- Step 3: Clear table ---
-    clear_ok, clear_detail = delete_table_rows("OfficeImagesTable")
-    step("Clear table", clear_ok, clear_detail)
-    if not clear_ok:
-        step_skip("Insert data", "Skipped (clear failed)")
-        section_result(False)
-        return False
-
-    # --- Step 4: Insert ---
-    image_rows = []
-    for key, url in data['data'].items():
-        if isinstance(url, str) and url.strip():
-            name = key.replace("Irres", "").replace("Image", "")
-            image_rows.append({"office_name": name, "image_url": url})
-
+def sync_locations() -> bool:
+    """Synchronizes city filter groups to FilterLocationsTable."""
+    section_header("SYNC: SEARCH LOCATIONS")
+    
     try:
-        insert_url = "https://api.botpress.cloud/v1/tables/OfficeImagesTable/rows"
-        res = requests.post(
-            insert_url,
-            headers=HEADERS,
-            json={"rows": image_rows},
-            timeout=BOTPRESS_TIMEOUT
-        )
-        res.raise_for_status()
-        step("Insert data", True, f"{len(image_rows)} rows inserted")
-        section_result(True)
-        return True
-    except requests.exceptions.HTTPError as e:
-        step("Insert data", False, f"HTTP {e.response.status_code}: {e.response.text}")
-        section_result(False)
-        return False
-    except Exception as e:
-        step("Insert data", False, str(e))
-        section_result(False)
-        return False
-
-
-def sync_locations():
-    """
-    Syncs locations to FilterLocationsTable.
-    Each location group gets its own row:
-      label (string) - display name,  e.g. "Gent + deelgemeenten"
-      value (string) - JSON array,    e.g. '["Gent", "Mariakerke", ...]'
-
-    Server is already awake after sync_listings() so no wake-up needed.
-    Returns True if fully successful, False otherwise.
-    """
-    section_header("LOCATIONS")
-
-    # --- Check API key ---
-    if not IRRES_API_KEY:
-        step("Fetch API",     False, "IRRES_API_KEY is not set")
-        step_skip("Validate data")
-        step_skip("Clear table")
-        step_skip("Insert data")
-        section_result(False)
-        return False
-
-    # --- Step 1: Fetch ---
-    try:
-        res = requests.get(LOCATIONS_API, headers=IRRES_API_HEADERS, timeout=FAST_API_TIMEOUT)
+        res = requests.get(LOCATIONS_API, headers=IRRES_API_HEADERS, timeout=TIMEOUT_FAST)
         res.raise_for_status()
         data = res.json()
-        groups = data.get('data', {}).get('location_groups', {})
-        fetch_detail = f"{len(groups)} location groups fetched"
+        
+        valid, msg = validate_location_payload(data)
+        step("Fetch & Validate", valid, msg)
+        if not valid: return False
+        
+        # Groups are stored as JSON strings in the 'value' column for Botpress parsing
+        groups = data['data']['location_groups']
+        rows = [{"label": k, "value": json.dumps(v)} for k, v in groups.items()]
+        
+        clear_botpress_table(TABLE_LOCATIONS)
+        ok, msg = insert_botpress_rows(TABLE_LOCATIONS, rows)
+        step("Insert data", ok, msg)
+        
+        section_result(ok)
+        return ok
     except Exception as e:
-        step("Fetch API", False, str(e))
-        step_skip("Validate data", "Skipped (fetch failed)")
-        step_skip("Clear table",   "Skipped (fetch failed)")
-        step_skip("Insert data",   "Skipped (fetch failed)")
+        step("Sync Error", False, str(e))
         section_result(False)
         return False
 
-    step("Fetch API", True, fetch_detail)
+# =============================================================================
+# BLOCK 9: MAIN EXECUTION FLOW
+# =============================================================================
 
-    # --- Step 2: Validate ---
-    is_valid, reason = validate_locations_data(data)
-    step("Validate data", is_valid, reason)
-    if not is_valid:
-        step_skip("Clear table", "Skipped (validation failed)")
-        step_skip("Insert data", "Skipped (validation failed)")
-        section_result(False)
-        return False
-
-    # --- Step 3: Clear table ---
-    clear_ok, clear_detail = delete_table_rows("FilterLocationsTable")
-    step("Clear table", clear_ok, clear_detail)
-    if not clear_ok:
-        step_skip("Insert data", "Skipped (clear failed)")
-        section_result(False)
-        return False
-
-    # --- Step 4: Insert ---
-    location_groups_data = data['data'].get('location_groups', {})
-    rows = []
-    for label, sub_locations in location_groups_data.items():
-        rows.append({
-            "label": label,
-            "value": json.dumps(sub_locations, ensure_ascii=False)
-        })
-
-    try:
-        insert_url = "https://api.botpress.cloud/v1/tables/FilterLocationsTable/rows"
-        res = requests.post(
-            insert_url,
-            headers=HEADERS,
-            json={"rows": rows},
-            timeout=BOTPRESS_TIMEOUT
-        )
-        res.raise_for_status()
-        step("Insert data", True, f"{len(rows)} rows inserted")
-        section_result(True)
-        return True
-    except requests.exceptions.HTTPError as e:
-        step("Insert data", False, f"HTTP {e.response.status_code}: {e.response.text}")
-        section_result(False)
-        return False
-    except Exception as e:
-        step("Insert data", False, str(e))
-        section_result(False)
-        return False
-
-
-# === ENTRY POINT ===
-
-if __name__ == "__main__":
+def run_orchestrator():
+    """Main entrance point for the sync script."""
     start_time = datetime.now()
-
+    
     line()
-    print(f"   IRRES -> Botpress Sync")
-    print(f"   {start_time.strftime('%Y-%m-%d  %H:%M:%S')}")
+    print(f"   IRRES -> BOTPRESS SYNC ENGINE v2.0")
+    print(f"   Session started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     line()
 
+    # Phase 1: Verification
+    if not run_preflight_checks():
+        print("\nCRITICAL: Pre-flight checks failed. Aborting sync.")
+        sys.exit(1)
+
+    # Phase 2: Synchronization
+    # We store results in a dictionary for a final summary report
     results = {
-        "LISTINGS":      sync_listings(),
-        "OFFICE IMAGES": sync_office_images(),
-        "LOCATIONS":     sync_locations(),
+        "Listings":  sync_listings(),
+        "Images":    sync_office_images(),
+        "Locations": sync_locations()
     }
 
-    duration = datetime.now() - start_time
-    total    = len(results)
-    passed   = sum(1 for ok in results.values() if ok)
-    failed   = [name for name, ok in results.items() if not ok]
-
+    # Phase 3: Final Reporting
+    end_time = datetime.now()
+    duration = end_time - start_time
     minutes, seconds = divmod(int(duration.total_seconds()), 60)
-    duration_str = f"{minutes}m {seconds:02d}s"
-
-    if passed == total:
-        overall = f"✅  {passed}/{total} succeeded"
-    elif passed == 0:
-        overall = f"❌  0/{total} succeeded"
-    else:
-        overall = f"⚠️   {passed}/{total} succeeded"
-
-    print(f"\nSYNC COMPLETE  {overall}  —  Duration: {duration_str}")
-    if failed:
-        print(f"Failed: {', '.join(failed)}")
+    
+    print("\n[ FINAL SUMMARY REPORT ]")
+    divider()
+    
+    total = len(results)
+    passed = sum(1 for v in results.values() if v)
+    
+    for module, ok in results.items():
+        icon = "✅" if ok else "❌"
+        print(f"  {module:<25} {icon} {'Success' if ok else 'Failed'}")
+    
+    divider()
+    print(f"  {'Total Modules':<25} {total}")
+    print(f"  {'Passed':<25} {passed}")
+    print(f"  {'Failed':<25} {total - passed}")
+    print(f"  {'Total Duration':<25} {minutes}m {seconds:02d}s")
     line()
-
+    
+    # Exit with appropriate status code for GitHub Actions
     if passed < total:
+        print("\nWARNING: One or more sync modules failed.")
+        sys.exit(1)
+    else:
+        print("\nSUCCESS: All data synchronized correctly.")
+        sys.exit(0)
+
+if __name__ == "__main__":
+    try:
+        run_orchestrator()
+    except KeyboardInterrupt:
+        print("\n\nProcess interrupted by user. Exiting...")
+        sys.exit(1)
+    except Exception as e:
+        logger.critical(f"Unhandled exception in main: {str(e)}", exc_info=True)
         sys.exit(1)
