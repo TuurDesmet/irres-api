@@ -273,7 +273,6 @@ def sync_listings():
     # --- Step 5: Insert ---
     rows = []
     for l in data['listings']:
-        details_json = json.dumps(l.get('details', {}), ensure_ascii=False)
         rows.append({
             "listing_id":     l.get('listing_id'),
             "listing_url":    l.get('listing_url'),
@@ -284,13 +283,12 @@ def sync_listings():
             "listing_type":   l.get('listing_type'),
             "Title":          l.get('title', ""),
             "Button1_Label":  l.get('button1_label', "Bekijk het op onze website"),
-            "Button1_Value":  l.get('button1_value', ""),
             "Button2_Label":  l.get('button2_label', ""),
             "Button2_email": l.get('button2_value', ""),
             "Button3_Label":  l.get('button3_label'),
             "Button3_Value":  l.get('button3_value'),
-            "details":        details_json,
-            "last_updated":   datetime.now().isoformat()
+            "address":        l.get('address') or "",
+            "page_content":   l.get('page_content') or "",
         })
 
     try:
