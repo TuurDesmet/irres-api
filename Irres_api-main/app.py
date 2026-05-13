@@ -1138,12 +1138,19 @@ def find_landscape_image_from_detail(soup):
 # BLOCK 15 — LISTING HELPER: extract_address_from_detail_soup()
 # =============================================================================
 
-def _listing_main_root(soup):
-    """Prefer Barba <main> so footer/legal <p> blocks are ignored."""
+def _is_listing_address_header_div(classes):
+    """
+    IRRES shows the property address only in the hero column:
+    <div class="lg:w-1/2 w-full text-20 leading-6">...</div>
+    Wider matching (e.g. any lg:w-1/2) would pick up office addresses elsewhere.
+    """
+    if not classes:
+        return False
+    s = " ".join(classes) if isinstance(classes, list) else str(classes)
     return (
-        soup.find("main", attrs={"data-barba": True})
-        or soup.find("main")
-        or soup
+        "lg:w-1/2" in s
+        and "text-20" in s
+        and "leading-6" in s
     )
 
 
@@ -1173,122 +1180,59 @@ def _format_address_pair(line1, line2):
     return ""
 
 
-def _walk_ld_json_nodes(node):
-    """Yield dict nodes from JSON-LD (handles @graph and nested dicts/lists)."""
-    if isinstance(node, dict):
-        yield node
-        g = node.get("@graph")
-        if isinstance(g, list):
-            for x in g:
-                yield from _walk_ld_json_nodes(x)
-        for v in node.values():
-            if isinstance(v, (dict, list)):
-                yield from _walk_ld_json_nodes(v)
-    elif isinstance(node, list):
-        for x in node:
-            yield from _walk_ld_json_nodes(x)
+def _paragraph_texts_for_listing_address(container):
+    """
+    Collect <p> text from the listing address column only.
+    Skips <p> inside <a> (e.g. 'Toon ligging') and inside iframes / embedded map UI.
+    """
+    from bs4 import Tag
 
+    out = []
 
-def _address_from_postal_dict(d):
-    """Build 'street, postcode city' from a schema.org-like PostalAddress dict."""
-    if not isinstance(d, dict):
-        return ""
-    street = normalize_text(d.get("streetAddress") or "")
-    pc = normalize_text(d.get("postalCode") or "")
-    city = normalize_text(d.get("addressLocality") or "")
-    if len(pc) >= 4 and pc[:4].isdigit() and (street or city):
-        line2 = f"{pc[:4]} {city}".strip() if city else pc
-        if street:
-            return _format_address_pair(street, line2)
-        return line2
-    return ""
+    # Prefer direct child <p> (canonical layout: two lines then map link)
+    for child in container.children:
+        if isinstance(child, Tag) and child.name == "p":
+            t = normalize_text(child.get_text())
+            if t:
+                out.append(t)
 
+    if len(out) >= 2:
+        return out
 
-def extract_address_from_ld_json(soup):
-    """Optional fallback: schema.org PostalAddress in application/ld+json."""
-    try:
-        for script in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
-            raw = (script.string or script.get_text() or "").strip()
-            if not raw:
-                continue
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            for obj in _walk_ld_json_nodes(data):
-                if not isinstance(obj, dict):
-                    continue
-                types = obj.get("@type")
-                type_list = types if isinstance(types, list) else ([types] if types else [])
-                type_names = {str(t) for t in type_list if t}
+    # Wrapped layout: gather <p> in tree order, exclude chrome / links
+    out = []
+    for p in container.find_all("p"):
+        if p.find_parent("a"):
+            continue
+        if p.find_parent("iframe"):
+            continue
+        t = normalize_text(p.get_text())
+        if not t:
+            continue
+        # Google Maps embed sometimes exposes stray short labels
+        if p.get("class") and any("gm-" in str(c) for c in p.get("class", [])):
+            continue
+        out.append(t)
 
-                if "PostalAddress" in type_names:
-                    got = _address_from_postal_dict(obj)
-                    if got:
-                        return got
-
-                addr = obj.get("address")
-                if isinstance(addr, str) and addr.strip():
-                    t = normalize_text(addr)
-                    if t and re.search(r"\b\d{4}\s+\S", t):
-                        return t
-                if isinstance(addr, dict):
-                    got = _address_from_postal_dict(addr)
-                    if got:
-                        return got
-                if isinstance(addr, list):
-                    for a in addr:
-                        if isinstance(a, dict):
-                            got = _address_from_postal_dict(a)
-                            if got:
-                                return got
-    except Exception as e:
-        logger.debug("ld+json address parse skipped: %s", e)
-    return ""
+    return out
 
 
 def extract_address_from_detail_soup(soup):
     """
-    Extract the property address from a listing detail page.
+    Extract the property address only from the IRRES listing hero block:
 
-    Tries in order:
-      1. Divs whose class contains lg:w-1/2 (nested <p> allowed).
-      2. Non-empty <p> lines under <main> in order (skips blank paragraphs).
-      3. application/ld+json PostalAddress / nested address.
+        <div class="lg:w-1/2 w-full text-20 leading-6">...</div>
 
-    Returns:
-        Address string: "{street}, {postcode} {city}"
+    No other regions of the page are scanned (avoids office addresses in footer
+    or elsewhere). Returns "" when that block has no valid street + postal pair.
     """
     try:
-        main = _listing_main_root(soup)
-
-        # Strategy 1: lg:w-1/2 blocks (paragraphs may be nested in inner divs)
-        for container in main.find_all("div", class_=re.compile(r"lg:w-1/2")):
-            texts = []
-            for p in container.find_all("p"):
-                t = normalize_text(p.get_text())
-                if t:
-                    texts.append(t)
+        for container in soup.find_all("div", class_=lambda c: _is_listing_address_header_div(c)):
+            texts = _paragraph_texts_for_listing_address(container)
             for i in range(len(texts) - 1):
                 a, b = texts[i], texts[i + 1]
                 if _belgian_postal_city_line(b) and _looks_like_street_line(a):
                     return _format_address_pair(a, b)
-
-        # Strategy 2: all <p> under main — flatten to non-empty lines, scan adjacent pairs
-        lines = []
-        for p in main.find_all("p"):
-            t = normalize_text(p.get_text())
-            if t:
-                lines.append(t)
-        for i in range(len(lines) - 1):
-            a, b = lines[i], lines[i + 1]
-            if _belgian_postal_city_line(b) and _looks_like_street_line(a):
-                return _format_address_pair(a, b)
-
-        # Strategy 3: JSON-LD
-        got = extract_address_from_ld_json(soup)
-        if got:
-            return got
 
         return ""
 
