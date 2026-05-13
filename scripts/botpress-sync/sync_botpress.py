@@ -28,7 +28,10 @@ IRRES_API_HEADERS = {"X-API-KEY": IRRES_API_KEY} if IRRES_API_KEY else {}
 # (connect_seconds, read_seconds)
 LISTINGS_TIMEOUT  = (15, 450)  # /api/listings visits every detail page — slow by design
 FAST_API_TIMEOUT  = (15, 90)   # /api/office-images and /api/locations are fast
-BOTPRESS_TIMEOUT  = (10, 30)   # Botpress Cloud is always fast
+BOTPRESS_TIMEOUT  = (10, 30)   # Botpress delete / small calls
+BOTPRESS_INSERT_TIMEOUT = (15, 120)  # Large JSON body: listings batch insert
+# Botpress Tables default row factor = 1 → ~4 KB per row (all columns). Stay under budget.
+BOTPRESS_ROW_MAX_BYTES = 3800
 HEALTH_TIMEOUT    = (10, 15)   # Quick ping to wake up the server
 
 # === WAKE-UP & RETRY CONFIGURATION ===
@@ -174,6 +177,85 @@ def delete_table_rows(table_name):
         return False, str(e)
 
 
+def _botpress_row_json_utf8_bytes(row):
+    """Serialized JSON size in UTF-8 bytes (matches Botpress row storage metering)."""
+    return len(json.dumps(row, ensure_ascii=False).encode("utf-8"))
+
+
+def truncate_listing_row_for_botpress(row, max_bytes=BOTPRESS_ROW_MAX_BYTES):
+    """
+    Return a shallow copy of row with long string fields shortened so the row
+    fits Botpress's default ~4KB-per-row limit (partial inserts otherwise).
+    """
+    row = dict(row)
+    tail = "…"
+
+    # Trim in order: largest / least critical for chat context first.
+    text_keys = (
+        "page_content",
+        "description",
+        "Title",
+        "Button3_Value",
+        "Button2_email",
+        "listing_url",
+        "photo_url",
+        "Button1_Label",
+        "Button2_Label",
+        "Button3_Label",
+        "address",
+        "location",
+        "price",
+        "listing_type",
+    )
+
+    def size():
+        return _botpress_row_json_utf8_bytes(row)
+
+    if size() <= max_bytes:
+        return row
+
+    for key in text_keys:
+        if size() <= max_bytes:
+            break
+        s = row.get(key)
+        if not isinstance(s, str) or not s:
+            continue
+        lo, hi = 0, len(s)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            cand = s[:mid] + (tail if mid < len(s) else "")
+            row[key] = cand
+            if size() <= max_bytes:
+                lo = mid
+            else:
+                hi = mid - 1
+        row[key] = s[:lo] + (tail if lo < len(s) else "")
+
+    # Last resort: halve longest remaining strings
+    for _ in range(64):
+        if size() <= max_bytes:
+            break
+        longest_k, longest_v = None, ""
+        for k, v in row.items():
+            if isinstance(v, str) and len(v) > len(longest_v):
+                longest_k, longest_v = k, v
+        if not longest_k or len(longest_v) <= 8:
+            break
+        row[longest_k] = longest_v[: max(4, len(longest_v) // 2)] + tail
+
+    return row
+
+
+def _log_botpress_table_response(body, label="Botpress"):
+    """Print warnings/errors from createTableRows (partial success is possible)."""
+    if not isinstance(body, dict):
+        return
+    for w in body.get("warnings") or []:
+        step_warn(label, str(w))
+    for err in body.get("errors") or []:
+        step(f"{label} error", False, str(err))
+
+
 # === SYNC FUNCTIONS ===
 
 def sync_listings():
@@ -270,10 +352,10 @@ def sync_listings():
         section_result(False)
         return False
 
-    # --- Step 5: Insert ---
+    # --- Step 5: Insert (truncate each row — Botpress default ~4KB/row) ---
     rows = []
     for l in data['listings']:
-        rows.append({
+        row = {
             "listing_id":     l.get('listing_id'),
             "listing_url":    l.get('listing_url'),
             "photo_url":      l.get('photo_url'),
@@ -289,7 +371,8 @@ def sync_listings():
             "Button3_Value":  l.get('button3_value'),
             "address":        l.get('address') or "",
             "page_content":   l.get('page_content') or "",
-        })
+        }
+        rows.append(truncate_listing_row_for_botpress(row))
 
     try:
         insert_url = "https://api.botpress.cloud/v1/tables/ListingsTable/rows"
@@ -297,10 +380,29 @@ def sync_listings():
             insert_url,
             headers=HEADERS,
             json={"rows": rows},
-            timeout=BOTPRESS_TIMEOUT
+            timeout=BOTPRESS_INSERT_TIMEOUT,
         )
         res.raise_for_status()
-        step("Insert data", True, f"{len(rows)} rows inserted")
+        try:
+            body = res.json()
+        except Exception:
+            body = {}
+
+        _log_botpress_table_response(body, "Listings insert")
+
+        inserted = body.get("rows") if isinstance(body.get("rows"), list) else []
+        n_in = len(rows)
+        n_out = len(inserted)
+        if n_out != n_in:
+            step(
+                "Insert data",
+                False,
+                f"partial insert: {n_out} of {n_in} rows stored (see Botpress errors above)",
+            )
+            section_result(False)
+            return False
+
+        step("Insert data", True, f"{n_in} rows inserted")
         section_result(True)
         return True
     except requests.exceptions.HTTPError as e:
