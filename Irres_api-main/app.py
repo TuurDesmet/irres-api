@@ -1138,63 +1138,160 @@ def find_landscape_image_from_detail(soup):
 # BLOCK 15 — LISTING HELPER: extract_address_from_detail_soup()
 # =============================================================================
 
+def _listing_main_root(soup):
+    """Prefer Barba <main> so footer/legal <p> blocks are ignored."""
+    return (
+        soup.find("main", attrs={"data-barba": True})
+        or soup.find("main")
+        or soup
+    )
+
+
+def _looks_like_street_line(s):
+    """Heuristic: Belgian street lines usually contain a house number or a street keyword."""
+    if not s or len(s) < 3:
+        return False
+    if re.search(r"\d", s):
+        return True
+    low = s.lower()
+    keywords = (
+        "laan", "straat", "steenweg", "weg", "lei", "dreef", "park", "plein",
+        "baan", "dorp", "hof", "pad", "route", "square", "rue", "avenue",
+        "gracht", "kaai", "wal", "residentie", "site", "zone",
+    )
+    return any(k in low for k in keywords)
+
+
+def _belgian_postal_city_line(s):
+    """Second line of a typical IRRES address: 4-digit postcode + locality."""
+    return bool(s and re.match(r"^\d{4}\s+\S", s))
+
+
+def _format_address_pair(line1, line2):
+    if line1 and line2:
+        return f"{line1}, {line2}"
+    return ""
+
+
+def _walk_ld_json_nodes(node):
+    """Yield dict nodes from JSON-LD (handles @graph and nested dicts/lists)."""
+    if isinstance(node, dict):
+        yield node
+        g = node.get("@graph")
+        if isinstance(g, list):
+            for x in g:
+                yield from _walk_ld_json_nodes(x)
+        for v in node.values():
+            if isinstance(v, (dict, list)):
+                yield from _walk_ld_json_nodes(v)
+    elif isinstance(node, list):
+        for x in node:
+            yield from _walk_ld_json_nodes(x)
+
+
+def _address_from_postal_dict(d):
+    """Build 'street, postcode city' from a schema.org-like PostalAddress dict."""
+    if not isinstance(d, dict):
+        return ""
+    street = normalize_text(d.get("streetAddress") or "")
+    pc = normalize_text(d.get("postalCode") or "")
+    city = normalize_text(d.get("addressLocality") or "")
+    if len(pc) >= 4 and pc[:4].isdigit() and (street or city):
+        line2 = f"{pc[:4]} {city}".strip() if city else pc
+        if street:
+            return _format_address_pair(street, line2)
+        return line2
+    return ""
+
+
+def extract_address_from_ld_json(soup):
+    """Optional fallback: schema.org PostalAddress in application/ld+json."""
+    try:
+        for script in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
+            raw = (script.string or script.get_text() or "").strip()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            for obj in _walk_ld_json_nodes(data):
+                if not isinstance(obj, dict):
+                    continue
+                types = obj.get("@type")
+                type_list = types if isinstance(types, list) else ([types] if types else [])
+                type_names = {str(t) for t in type_list if t}
+
+                if "PostalAddress" in type_names:
+                    got = _address_from_postal_dict(obj)
+                    if got:
+                        return got
+
+                addr = obj.get("address")
+                if isinstance(addr, str) and addr.strip():
+                    t = normalize_text(addr)
+                    if t and re.search(r"\b\d{4}\s+\S", t):
+                        return t
+                if isinstance(addr, dict):
+                    got = _address_from_postal_dict(addr)
+                    if got:
+                        return got
+                if isinstance(addr, list):
+                    for a in addr:
+                        if isinstance(a, dict):
+                            got = _address_from_postal_dict(a)
+                            if got:
+                                return got
+    except Exception as e:
+        logger.debug("ld+json address parse skipped: %s", e)
+    return ""
+
+
 def extract_address_from_detail_soup(soup):
     """
     Extract the property address from a listing detail page.
-    
-    The address is located in a div structure like:
-    <div class="lg:w-1/2 w-full text-20 leading-6">
-        <p>Leernsesteenweg 181</p>
-        <p>9800 Bachte-Maria-Leerne</p>
-    </div>
-    
-    Args:
-        soup: BeautifulSoup object of the detail page.
-    
+
+    Tries in order:
+      1. Divs whose class contains lg:w-1/2 (nested <p> allowed).
+      2. Non-empty <p> lines under <main> in order (skips blank paragraphs).
+      3. application/ld+json PostalAddress / nested address.
+
     Returns:
-        Address string: "{street} {nr}, {postcode} {city}"
+        Address string: "{street}, {postcode} {city}"
     """
     try:
-        # Look for the address container - it contains the location text
-        # and is usually near the top of the page
-        address_lines = []
-        
-        # Strategy 1: Find div with class containing "lg:w-1/2" that has address-like content
-        containers = soup.find_all('div', class_=re.compile(r'lg:w-1/2'))
-        
-        for container in containers:
-            paragraphs = container.find_all('p', recursive=False, limit=3)
-            
-            # Check if this looks like an address block
-            # (has 2-3 paragraphs, second one starts with digits = postal code)
-            if len(paragraphs) >= 2:
-                first_p = normalize_text(paragraphs[0].get_text())
-                second_p = normalize_text(paragraphs[1].get_text())
-                
-                # Validate: second line should start with postal code (4 digits for Belgium)
-                if second_p and re.match(r'^\d{4}\s', second_p):
-                    address_lines = [first_p, second_p]
-                    break
-        
-        # Strategy 2: Fallback - look for pattern "street number" followed by "postal city"
-        if not address_lines:
-            all_p = soup.find_all('p')
-            for i, p in enumerate(all_p[:-1]):
-                text1 = normalize_text(p.get_text())
-                text2 = normalize_text(all_p[i + 1].get_text())
-                
-                # Check if text2 looks like "9800 City-Name"
-                if text2 and re.match(r'^\d{4}\s+[A-Za-z]', text2):
-                    # Check if text1 looks like a street (has number in it)
-                    if text1 and re.search(r'\d', text1):
-                        address_lines = [text1, text2]
-                        break
-        
-        if address_lines:
-            return f"{address_lines[0]}, {address_lines[1]}"
-        
+        main = _listing_main_root(soup)
+
+        # Strategy 1: lg:w-1/2 blocks (paragraphs may be nested in inner divs)
+        for container in main.find_all("div", class_=re.compile(r"lg:w-1/2")):
+            texts = []
+            for p in container.find_all("p"):
+                t = normalize_text(p.get_text())
+                if t:
+                    texts.append(t)
+            for i in range(len(texts) - 1):
+                a, b = texts[i], texts[i + 1]
+                if _belgian_postal_city_line(b) and _looks_like_street_line(a):
+                    return _format_address_pair(a, b)
+
+        # Strategy 2: all <p> under main — flatten to non-empty lines, scan adjacent pairs
+        lines = []
+        for p in main.find_all("p"):
+            t = normalize_text(p.get_text())
+            if t:
+                lines.append(t)
+        for i in range(len(lines) - 1):
+            a, b = lines[i], lines[i + 1]
+            if _belgian_postal_city_line(b) and _looks_like_street_line(a):
+                return _format_address_pair(a, b)
+
+        # Strategy 3: JSON-LD
+        got = extract_address_from_ld_json(soup)
+        if got:
+            return got
+
         return ""
-        
+
     except Exception as e:
         logger.warning(f"Failed to extract address: {e}")
         return ""
