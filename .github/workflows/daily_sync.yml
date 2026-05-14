@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/setup-python@v6
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -48,4 +48,3 @@ jobs:
           BOTPRESS_TOKEN: ${{ secrets.BOTPRESS_TOKEN }}
           IRRES_API_KEY: ${{ secrets.IRRES_API_KEY }}
         run: cd scripts/botpress-sync && python sync_botpress.py
-
