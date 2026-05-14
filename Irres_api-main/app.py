@@ -47,22 +47,67 @@ import re
 import html
 import time
 import json
+import uuid
 import logging
 import unicodedata
 from datetime import datetime
 from urllib.parse import quote
 
-from flask import Flask, jsonify, Response, request
+from flask import Flask, jsonify, Response, request, g
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import requests
 from bs4 import BeautifulSoup
 
+from logging_config import configure_logging
+
 # Initialize Flask App
 app = Flask(__name__)
 CORS(app)
 app.config['JSON_AS_ASCII'] = False  # Ensure UTF-8 characters are preserved in JSON output
+
+configure_logging(service="api")
+logger = logging.getLogger("irres.api")
+
+
+@app.before_request
+def _irres_request_log_start():
+    if request.endpoint == "static":
+        return
+    g.request_id = str(uuid.uuid4())
+    if request.endpoint in ("get_listings", "get_locations", "get_office_images"):
+        g._irres_req_t0 = time.perf_counter()
+        logger.info(
+            "event=http_request_start method=%s path=%s endpoint=%s",
+            request.method,
+            request.path,
+            request.endpoint,
+        )
+
+
+@app.after_request
+def _irres_request_log_done(response):
+    t0 = getattr(g, "_irres_req_t0", None)
+    if t0 is not None:
+        ms = int((time.perf_counter() - t0) * 1000)
+        summary = getattr(g, "_log_summary", None)
+        if summary:
+            logger.info(
+                "event=http_request_done path=%s status=%s duration_ms=%s %s",
+                request.path,
+                response.status_code,
+                ms,
+                summary,
+            )
+        else:
+            logger.info(
+                "event=http_request_done path=%s status=%s duration_ms=%s",
+                request.path,
+                response.status_code,
+                ms,
+            )
+    return response
 
 
 # =============================================================================
@@ -132,8 +177,9 @@ def require_api_key():
     # Explicitly block query-parameter authentication attempts
     if 'api_key' in request.args:
         logger.warning(
-            f"SECURITY: Rejected ?api_key query param from {request.remote_addr} "
-            f"on {request.path}. Use X-API-KEY header instead."
+            "event=security_reject_query_api_key client=%s path=%s detail=use_X_API_KEY_header",
+            request.remote_addr,
+            request.path,
         )
         return jsonify({
             "error": "Unauthorized",
@@ -145,8 +191,9 @@ def require_api_key():
 
     if not provided_api_key:
         logger.warning(
-            f"SECURITY: Missing X-API-KEY header from {request.remote_addr} "
-            f"on {request.path}"
+            "event=security_missing_api_key client=%s path=%s",
+            request.remote_addr,
+            request.path,
         )
         return jsonify({
             "error": "Unauthorized",
@@ -155,8 +202,9 @@ def require_api_key():
 
     if provided_api_key != API_KEY:
         logger.warning(
-            f"SECURITY: Invalid X-API-KEY from {request.remote_addr} "
-            f"on {request.path}"
+            "event=security_invalid_api_key client=%s path=%s",
+            request.remote_addr,
+            request.path,
         )
         return jsonify({
             "error": "Unauthorized",
@@ -180,8 +228,10 @@ def ratelimit_handler(e):
       - CWE-770 — Allocation of Resources Without Limits or Throttling
     """
     logger.warning(
-        f"Rate limit exceeded for {request.remote_addr} on {request.path}. "
-        f"UA: {request.headers.get('User-Agent', 'unknown')}"
+        "event=rate_limit_exceeded client=%s path=%s ua=%s",
+        request.remote_addr,
+        request.path,
+        request.headers.get("User-Agent", "unknown"),
     )
     return jsonify({
         "error": "Rate Limit Exceeded",
@@ -191,14 +241,8 @@ def ratelimit_handler(e):
 
 
 # =============================================================================
-# BLOCK 4 — LOGGING & GLOBAL CONSTANTS
+# BLOCK 4 — GLOBAL CONSTANTS (logging configured after Flask app init)
 # =============================================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Browser-like User-Agent to avoid being blocked by IRRES.be's server
 HEADERS = {
@@ -265,7 +309,7 @@ def secure_get(url, headers=None, timeout=15):
         response.raise_for_status()
         return response
     except requests.RequestException as e:
-        logger.error(f"secure_get failed for {url}: {e}")
+        logger.debug("event=http_get_failed url=%s error=%s", url, e)
         raise
 
 
@@ -339,12 +383,16 @@ class IRRESLocationScraper:
             requests.RequestException: If the request fails for any reason.
         """
         try:
-            logger.info(f"Fetching page: {self.BASE_URL}")
+            logger.debug("event=http_get_start url=%s", self.BASE_URL)
             response = secure_get(self.BASE_URL, headers=HEADERS, timeout=self.timeout)
-            logger.info(f"Page fetched successfully ({len(response.text):,} chars)")
+            logger.debug(
+                "event=http_get_ok url=%s bytes=%s",
+                self.BASE_URL,
+                len(response.text),
+            )
             return response.text
         except requests.RequestException as e:
-            logger.error(f"Failed to fetch locations page: {e}")
+            logger.debug("event=locations_fetch_failed url=%s error=%s", self.BASE_URL, e)
             raise
 
     # -------------------------------------------------------------------------
@@ -412,9 +460,7 @@ class IRRESLocationScraper:
 
         if not filter_container:
             logger.warning(
-                "City filter-container not found on page. "
-                "Falling back to full-document search — results may include "
-                "non-location items. The IRRES.be page structure may have changed."
+                "event=locations_parse_fallback client=parser detail=city_filter_container_missing"
             )
             filter_container = soup
 
@@ -427,8 +473,7 @@ class IRRESLocationScraper:
 
         if not search_data_ul:
             logger.error(
-                "search-data <ul> not found inside the city filter container. "
-                "The IRRES.be page structure has likely changed."
+                "event=locations_search_data_missing detail=irres_page_structure_changed"
             )
             return all_locations, location_groups
 
@@ -436,9 +481,9 @@ class IRRESLocationScraper:
             'li',
             attrs={'data-label': True, 'data-value': True}
         )
-        logger.info(
-            f"Found {len(li_elements)} raw <li> elements in .search-data "
-            f"(before deduplication)"
+        logger.debug(
+            "event=locations_raw_li_count count=%s phase=before_dedup",
+            len(li_elements),
         )
 
         # ------------------------------------------------------------------
@@ -492,9 +537,9 @@ class IRRESLocationScraper:
             all_locations.append({"label": label, "value": value})
             location_groups[label] = sub_locations
 
-        logger.info(
-            f"Parsed {len(all_locations)} unique location groups after "
-            f"deduplication and filtering"
+        logger.debug(
+            "event=locations_parsed_unique count=%s phase=after_dedup",
+            len(all_locations),
         )
         return all_locations, location_groups
 
@@ -514,6 +559,7 @@ class IRRESLocationScraper:
             error          : error message string (only present on "error")
         """
         try:
+            t0 = time.perf_counter()
             html_content = self.fetch_page()
             all_locations, location_groups = self.parse_locations(html_content)
 
@@ -524,9 +570,16 @@ class IRRESLocationScraper:
             if not all_locations:
                 status = "warning"
                 logger.warning(
-                    "IRRESLocationScraper returned 0 locations. "
-                    "The IRRES.be page structure may have changed."
+                    "event=locations_scrape_empty detail=irres_page_structure_may_have_changed"
                 )
+
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            logger.info(
+                "event=locations_scrape_done count=%s status=%s duration_ms=%s",
+                len(all_locations),
+                status,
+                elapsed_ms,
+            )
 
             return {
                 "all_locations":   all_locations,
@@ -536,7 +589,7 @@ class IRRESLocationScraper:
             }
 
         except Exception as e:
-            logger.error(f"IRRESLocationScraper.scrape() failed: {e}")
+            logger.exception("event=locations_scrape_failed")
             return {
                 "all_locations":   [],
                 "location_groups": {},
@@ -565,12 +618,16 @@ class IRRESOfficeImagesScraper:
 
     def fetch_page(self) -> str:
         try:
-            logger.info(f"Fetching page: {self.BASE_URL}")
+            logger.debug("event=http_get_start url=%s", self.BASE_URL)
             response = secure_get(self.BASE_URL, headers=HEADERS, timeout=self.timeout)
-            logger.info(f"Contact page fetched ({len(response.text):,} chars)")
+            logger.debug(
+                "event=http_get_ok url=%s bytes=%s",
+                self.BASE_URL,
+                len(response.text),
+            )
             return response.text
         except requests.RequestException as e:
-            logger.error(f"Failed to fetch contact page: {e}")
+            logger.debug("event=office_fetch_failed url=%s error=%s", self.BASE_URL, e)
             raise
 
     @staticmethod
@@ -652,20 +709,27 @@ class IRRESOfficeImagesScraper:
             for image_url in self._collect_kantoor_images(container):
                 out.append({"office_name": office_name, "image_url": image_url})
 
-        logger.info(f"Office image scraping complete: {len(out)} image row(s)")
+        logger.debug("event=office_parse_rows count=%s", len(out))
         return out
 
     def scrape(self) -> dict:
         try:
+            t0 = time.perf_counter()
             html_content = self.fetch_page()
             images = self.parse_office_images(html_content)
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            logger.info(
+                "event=office_scrape_done count=%s status=success duration_ms=%s",
+                len(images),
+                elapsed_ms,
+            )
             return {
                 "status": "success",
                 "images": images,
                 "count":  len(images),
             }
         except Exception as e:
-            logger.error(f"IRRESOfficeImagesScraper.scrape() failed: {e}")
+            logger.exception("event=office_scrape_failed")
             return {
                 "status": "error",
                 "images": [],
@@ -1237,7 +1301,7 @@ def extract_address_from_detail_soup(soup):
         return ""
 
     except Exception as e:
-        logger.warning(f"Failed to extract address: {e}")
+        logger.warning("event=listing_address_extract_failed error=%s", e)
         return ""
 
 
@@ -1346,7 +1410,7 @@ def extract_page_content_from_detail_soup(soup):
         return result.strip()
 
     except Exception as e:
-        logger.warning(f"Failed to extract page content: {e}")
+        logger.warning("event=listing_page_content_extract_failed error=%s", e)
         return ""
 
 
@@ -1475,6 +1539,7 @@ def get_listings():
     address, and page_content (full <main> text with markdown links).
     """
     try:
+        t0 = time.perf_counter()
         list_page_url = "https://irres.be/te-koop"
         resp          = secure_get(list_page_url, headers=HEADERS, timeout=15)
         soup          = BeautifulSoup(resp.content, 'html.parser')
@@ -1500,6 +1565,8 @@ def get_listings():
             seen.add(full)
             listing_links.append(a)
 
+        logger.info("event=listings_scrape_start links=%s", len(listing_links))
+
         listings = []
 
         for link in listing_links:
@@ -1507,7 +1574,9 @@ def get_listings():
 
             anchor_name = parsed.get('anchor_name') or ""
             if not anchor_name:
-                logger.debug("Skipping listing card without name/data-name (listing_id)")
+                logger.debug(
+                    "event=listing_skip_card reason=missing_listing_id anchor_name_empty"
+                )
                 continue
 
             listing_url = parsed.get('listing_url') or ""
@@ -1607,6 +1676,14 @@ def get_listings():
             seen_ids.add(lid)
             uniq.append(li)
 
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info(
+            "event=listings_scrape_done count=%s duration_ms=%s",
+            len(uniq),
+            elapsed_ms,
+        )
+        g._log_summary = "listings_count=%s" % len(uniq)
+
         payload = {
             "success":  True,
             "count":    len(uniq),
@@ -1618,6 +1695,7 @@ def get_listings():
         )
 
     except Exception as e:
+        logger.exception("event=listings_scrape_failed http_status=200 success_json=false")
         payload = {
             "success":  False,
             "error":    str(e),
@@ -1668,8 +1746,6 @@ def get_locations():
         ...
     """
     try:
-        logger.info("GET /api/locations — fetching locations from IRRES.be")
-
         scraper = IRRESLocationScraper()
         result  = scraper.scrape()
 
@@ -1696,11 +1772,10 @@ def get_locations():
             }
         }
 
-        logger.info(f"Successfully retrieved {len(result['all_locations'])} location groups")
         return jsonify(response_body), 200
 
     except Exception as e:
-        logger.error(f"GET /api/locations failed: {e}")
+        logger.exception("event=get_locations_failed")
         return jsonify({
             "status":    "error",
             "timestamp": datetime.now().isoformat(),
@@ -1739,8 +1814,6 @@ def get_office_images():
         }
     """
     try:
-        logger.info("GET /api/office-images — fetching office images from IRRES.be")
-
         scraper = IRRESOfficeImagesScraper()
         result  = scraper.scrape()
 
@@ -1751,13 +1824,16 @@ def get_office_images():
         }
 
         if result['status'] == 'success':
-            logger.info(f"Successfully retrieved {result['count']} office images")
             return jsonify(response_body), 200
-        else:
-            return jsonify(response_body), 500
+        logger.warning(
+            "event=get_office_images_scraper_error status=%s error=%s",
+            result.get("status"),
+            result.get("error", ""),
+        )
+        return jsonify(response_body), 500
 
     except Exception as e:
-        logger.error(f"GET /api/office-images failed: {e}")
+        logger.exception("event=get_office_images_failed")
         return jsonify({
             "status":    "error",
             "timestamp": datetime.now().isoformat(),
