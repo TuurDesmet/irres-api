@@ -3,7 +3,13 @@ import json
 import os
 import sys
 import time
+import logging
 from datetime import datetime
+
+from logging_config import begin_sync_run, configure_logging, end_sync_run
+
+configure_logging(service="sync")
+logger = logging.getLogger("irres.sync")
 
 # === CONFIGURATION ===
 BOT_ID = os.getenv("BOT_ID")
@@ -40,33 +46,51 @@ WAKE_UP_INTERVAL    = 5    # Seconds between each health check ping
 LISTINGS_MAX_RETRY  = 3    # Number of times to retry /api/listings on failure
 LISTINGS_RETRY_WAIT = 30   # Seconds to wait between each retry
 
-# === DISPLAY HELPERS ===
-
-W = 50  # Line width for separators
 
 def line():
-    print("=" * W)
+    logger.info("event=sync_separator kind=equals")
+
 
 def divider():
-    print("-" * W)
+    logger.info("event=sync_separator kind=hyphen")
+
 
 def step(label, ok, detail=""):
-    status = "✅" if ok else "❌"
-    print(f"  {label:<22} {status}  {detail}")
+    logger.info(
+        "event=sync_step name=%s ok=%s detail=%s",
+        label.replace(" ", "_"),
+        str(ok).lower(),
+        detail or "-",
+    )
+
 
 def step_warn(label, detail=""):
-    print(f"  {label:<22} ⚠️   {detail}")
+    logger.warning(
+        "event=sync_step_warn name=%s detail=%s",
+        label.replace(" ", "_"),
+        detail or "-",
+    )
+
 
 def step_skip(label, reason="Skipped"):
-    print(f"  {label:<22} ⏭️   {reason}")
+    logger.info(
+        "event=sync_step_skip name=%s reason=%s",
+        label.replace(" ", "_"),
+        reason,
+    )
+
 
 def section_header(title):
-    print(f"\n{title}")
+    logger.info("event=sync_section title=%s", title.replace(" ", "_"))
+
 
 def section_result(ok):
-    status = "✅  SUCCESS" if ok else "❌  FAILED"
+    logger.info(
+        "event=sync_section_result ok=%s",
+        str(ok).lower(),
+    )
     divider()
-    print(f"  {'Result':<22} {status}")
+    step("Result", ok, "SUCCESS" if ok else "FAILED")
     line()
 
 
@@ -94,11 +118,26 @@ def wait_for_server():
         try:
             res = requests.get(HEALTH_URL, headers=IRRES_API_HEADERS, timeout=HEALTH_TIMEOUT)
             if res.status_code == 200:
+                logger.info(
+                    "event=wake_up_server_done attempts=%s elapsed_s=%s",
+                    attempt,
+                    elapsed,
+                )
                 return True, elapsed
         except Exception:
-            pass  # Server not yet awake — keep trying
+            logger.debug(
+                "event=wake_up_server_attempt attempt=%s elapsed_s=%s",
+                attempt,
+                elapsed,
+            )
 
         if elapsed >= WAKE_UP_MAX_WAIT:
+            logger.info(
+                "event=wake_up_server_failed attempts=%s elapsed_s=%s max_wait_s=%s",
+                attempt,
+                elapsed,
+                WAKE_UP_MAX_WAIT,
+            )
             return False, elapsed
 
         time.sleep(WAKE_UP_INTERVAL)
@@ -247,13 +286,13 @@ def truncate_listing_row_for_botpress(row, max_bytes=BOTPRESS_ROW_MAX_BYTES):
 
 
 def _log_botpress_table_response(body, label="Botpress"):
-    """Print warnings/errors from createTableRows (partial success is possible)."""
+    """Log warnings/errors from createTableRows (partial success is possible)."""
     if not isinstance(body, dict):
         return
     for w in body.get("warnings") or []:
         step_warn(label, str(w))
     for err in body.get("errors") or []:
-        step(f"{label} error", False, str(err))
+        step(f"{label}_error", False, str(err))
 
 
 # === SYNC FUNCTIONS ===
@@ -275,11 +314,11 @@ def sync_listings():
 
     # --- Check API key ---
     if not IRRES_API_KEY:
-        step("Wake up server", False, "IRRES_API_KEY is not set")
-        step_skip("Fetch API")
-        step_skip("Validate data")
-        step_skip("Clear table")
-        step_skip("Insert data")
+        step("Wake_up_server", False, "IRRES_API_KEY is not set")
+        step_skip("Fetch_API")
+        step_skip("Validate_data")
+        step_skip("Clear_table")
+        step_skip("Insert_data")
         section_result(False)
         return False
 
@@ -287,15 +326,19 @@ def sync_listings():
     # Render.com free tier spins down after inactivity.
     # We ping /health repeatedly until the server responds, BEFORE hitting
     # the expensive /api/listings endpoint.
-    print(f"  {'Wake up server':<22} ⏳  Pinging server (max {WAKE_UP_MAX_WAIT}s)...")
+    logger.info(
+        "event=wake_up_server_begin max_wait_s=%s interval_s=%s",
+        WAKE_UP_MAX_WAIT,
+        WAKE_UP_INTERVAL,
+    )
     server_ok, elapsed = wait_for_server()
-    step("Wake up server", server_ok, f"Server online in {elapsed}s" if server_ok else f"No response after {elapsed}s")
+    step("Wake_up_server", server_ok, f"Server online in {elapsed}s" if server_ok else f"No response after {elapsed}s")
 
     if not server_ok:
-        step_skip("Fetch API",     "Skipped (server offline)")
-        step_skip("Validate data", "Skipped (server offline)")
-        step_skip("Clear table",   "Skipped (server offline)")
-        step_skip("Insert data",   "Skipped (server offline)")
+        step_skip("Fetch_API",     "Skipped (server offline)")
+        step_skip("Validate_data", "Skipped (server offline)")
+        step_skip("Clear_table",   "Skipped (server offline)")
+        step_skip("Insert_data",   "Skipped (server offline)")
         section_result(False)
         return False
 
@@ -317,38 +360,38 @@ def sync_listings():
             fetch_error = str(e)
             if attempt < LISTINGS_MAX_RETRY:
                 step_warn(
-                    "Fetch API",
+                    "Fetch_API",
                     f"Attempt {attempt}/{LISTINGS_MAX_RETRY} failed — retrying in {LISTINGS_RETRY_WAIT}s"
                 )
                 time.sleep(LISTINGS_RETRY_WAIT)
 
     if data is None:
-        step("Fetch API", False, f"All {LISTINGS_MAX_RETRY} attempts failed: {fetch_error}")
-        step_skip("Validate data", "Skipped (fetch failed)")
-        step_skip("Clear table",   "Skipped (fetch failed)")
-        step_skip("Insert data",   "Skipped (fetch failed)")
+        step("Fetch_API", False, f"All {LISTINGS_MAX_RETRY} attempts failed: {fetch_error}")
+        step_skip("Validate_data", "Skipped (fetch failed)")
+        step_skip("Clear_table",   "Skipped (fetch failed)")
+        step_skip("Insert_data",   "Skipped (fetch failed)")
         section_result(False)
         return False
 
     attempt_label = f"{len(data.get('listings', []))} listings fetched"
     if attempt > 1:
         attempt_label += f" (attempt {attempt}/{LISTINGS_MAX_RETRY})"
-    step("Fetch API", True, attempt_label)
+    step("Fetch_API", True, attempt_label)
 
     # --- Step 3: Validate ---
     is_valid, reason = validate_listings_data(data)
-    step("Validate data", is_valid, reason)
+    step("Validate_data", is_valid, reason)
     if not is_valid:
-        step_skip("Clear table", "Skipped (validation failed)")
-        step_skip("Insert data", "Skipped (validation failed)")
+        step_skip("Clear_table", "Skipped (validation failed)")
+        step_skip("Insert_data", "Skipped (validation failed)")
         section_result(False)
         return False
 
     # --- Step 4: Clear table ---
     clear_ok, clear_detail = delete_table_rows("ListingsTable")
-    step("Clear table", clear_ok, clear_detail)
+    step("Clear_table", clear_ok, clear_detail)
     if not clear_ok:
-        step_skip("Insert data", "Skipped (clear failed)")
+        step_skip("Insert_data", "Skipped (clear failed)")
         section_result(False)
         return False
 
@@ -395,22 +438,22 @@ def sync_listings():
         n_out = len(inserted)
         if n_out != n_in:
             step(
-                "Insert data",
+                "Insert_data",
                 False,
                 f"partial insert: {n_out} of {n_in} rows stored (see Botpress errors above)",
             )
             section_result(False)
             return False
 
-        step("Insert data", True, f"{n_in} rows inserted")
+        step("Insert_data", True, f"{n_in} rows inserted")
         section_result(True)
         return True
     except requests.exceptions.HTTPError as e:
-        step("Insert data", False, f"HTTP {e.response.status_code}: {e.response.text}")
+        step("Insert_data", False, f"HTTP {e.response.status_code}: {e.response.text}")
         section_result(False)
         return False
     except Exception as e:
-        step("Insert data", False, str(e))
+        step("Insert_data", False, str(e))
         section_result(False)
         return False
 
@@ -425,10 +468,10 @@ def sync_office_images():
 
     # --- Check API key ---
     if not IRRES_API_KEY:
-        step("Fetch API",     False, "IRRES_API_KEY is not set")
-        step_skip("Validate data")
-        step_skip("Clear table")
-        step_skip("Insert data")
+        step("Fetch_API",     False, "IRRES_API_KEY is not set")
+        step_skip("Validate_data")
+        step_skip("Clear_table")
+        step_skip("Insert_data")
         section_result(False)
         return False
 
@@ -439,29 +482,29 @@ def sync_office_images():
         data = res.json()
         fetch_detail = f"{len(data.get('data') or [])} images fetched"
     except Exception as e:
-        step("Fetch API", False, str(e))
-        step_skip("Validate data", "Skipped (fetch failed)")
-        step_skip("Clear table",   "Skipped (fetch failed)")
-        step_skip("Insert data",   "Skipped (fetch failed)")
+        step("Fetch_API", False, str(e))
+        step_skip("Validate_data", "Skipped (fetch failed)")
+        step_skip("Clear_table",   "Skipped (fetch failed)")
+        step_skip("Insert_data",   "Skipped (fetch failed)")
         section_result(False)
         return False
 
-    step("Fetch API", True, fetch_detail)
+    step("Fetch_API", True, fetch_detail)
 
     # --- Step 2: Validate ---
     is_valid, reason = validate_office_images_data(data)
-    step("Validate data", is_valid, reason)
+    step("Validate_data", is_valid, reason)
     if not is_valid:
-        step_skip("Clear table", "Skipped (validation failed)")
-        step_skip("Insert data", "Skipped (validation failed)")
+        step_skip("Clear_table", "Skipped (validation failed)")
+        step_skip("Insert_data", "Skipped (validation failed)")
         section_result(False)
         return False
 
     # --- Step 3: Clear table ---
     clear_ok, clear_detail = delete_table_rows("OfficeImagesTable")
-    step("Clear table", clear_ok, clear_detail)
+    step("Clear_table", clear_ok, clear_detail)
     if not clear_ok:
-        step_skip("Insert data", "Skipped (clear failed)")
+        step_skip("Insert_data", "Skipped (clear failed)")
         section_result(False)
         return False
 
@@ -487,15 +530,15 @@ def sync_office_images():
             timeout=BOTPRESS_TIMEOUT
         )
         res.raise_for_status()
-        step("Insert data", True, f"{len(image_rows)} rows inserted")
+        step("Insert_data", True, f"{len(image_rows)} rows inserted")
         section_result(True)
         return True
     except requests.exceptions.HTTPError as e:
-        step("Insert data", False, f"HTTP {e.response.status_code}: {e.response.text}")
+        step("Insert_data", False, f"HTTP {e.response.status_code}: {e.response.text}")
         section_result(False)
         return False
     except Exception as e:
-        step("Insert data", False, str(e))
+        step("Insert_data", False, str(e))
         section_result(False)
         return False
 
@@ -514,10 +557,10 @@ def sync_locations():
 
     # --- Check API key ---
     if not IRRES_API_KEY:
-        step("Fetch API",     False, "IRRES_API_KEY is not set")
-        step_skip("Validate data")
-        step_skip("Clear table")
-        step_skip("Insert data")
+        step("Fetch_API",     False, "IRRES_API_KEY is not set")
+        step_skip("Validate_data")
+        step_skip("Clear_table")
+        step_skip("Insert_data")
         section_result(False)
         return False
 
@@ -529,29 +572,29 @@ def sync_locations():
         groups = data.get('data', {}).get('location_groups', {})
         fetch_detail = f"{len(groups)} location groups fetched"
     except Exception as e:
-        step("Fetch API", False, str(e))
-        step_skip("Validate data", "Skipped (fetch failed)")
-        step_skip("Clear table",   "Skipped (fetch failed)")
-        step_skip("Insert data",   "Skipped (fetch failed)")
+        step("Fetch_API", False, str(e))
+        step_skip("Validate_data", "Skipped (fetch failed)")
+        step_skip("Clear_table",   "Skipped (fetch failed)")
+        step_skip("Insert_data",   "Skipped (fetch failed)")
         section_result(False)
         return False
 
-    step("Fetch API", True, fetch_detail)
+    step("Fetch_API", True, fetch_detail)
 
     # --- Step 2: Validate ---
     is_valid, reason = validate_locations_data(data)
-    step("Validate data", is_valid, reason)
+    step("Validate_data", is_valid, reason)
     if not is_valid:
-        step_skip("Clear table", "Skipped (validation failed)")
-        step_skip("Insert data", "Skipped (validation failed)")
+        step_skip("Clear_table", "Skipped (validation failed)")
+        step_skip("Insert_data", "Skipped (validation failed)")
         section_result(False)
         return False
 
     # --- Step 3: Clear table ---
     clear_ok, clear_detail = delete_table_rows("FilterLocationsTable")
-    step("Clear table", clear_ok, clear_detail)
+    step("Clear_table", clear_ok, clear_detail)
     if not clear_ok:
-        step_skip("Insert data", "Skipped (clear failed)")
+        step_skip("Insert_data", "Skipped (clear failed)")
         section_result(False)
         return False
 
@@ -573,15 +616,15 @@ def sync_locations():
             timeout=BOTPRESS_TIMEOUT
         )
         res.raise_for_status()
-        step("Insert data", True, f"{len(rows)} rows inserted")
+        step("Insert_data", True, f"{len(rows)} rows inserted")
         section_result(True)
         return True
     except requests.exceptions.HTTPError as e:
-        step("Insert data", False, f"HTTP {e.response.status_code}: {e.response.text}")
+        step("Insert_data", False, f"HTTP {e.response.status_code}: {e.response.text}")
         section_result(False)
         return False
     except Exception as e:
-        step("Insert data", False, str(e))
+        step("Insert_data", False, str(e))
         section_result(False)
         return False
 
@@ -590,37 +633,41 @@ def sync_locations():
 
 if __name__ == "__main__":
     start_time = datetime.now()
+    run_token = begin_sync_run()
 
-    line()
-    print(f"   IRRES -> Botpress Sync")
-    print(f"   {start_time.strftime('%Y-%m-%d  %H:%M:%S')}")
-    line()
+    try:
+        line()
+        logger.info(
+            "event=sync_run_start title=IRRES_to_Botpress ts=%s",
+            start_time.strftime("%Y-%m-%d_%H:%M:%S"),
+        )
+        line()
 
-    results = {
-        "LISTINGS":      sync_listings(),
-        "OFFICE IMAGES": sync_office_images(),
-        "LOCATIONS":     sync_locations(),
-    }
+        results = {
+            "LISTINGS":      sync_listings(),
+            "OFFICE IMAGES": sync_office_images(),
+            "LOCATIONS":     sync_locations(),
+        }
 
-    duration = datetime.now() - start_time
-    total    = len(results)
-    passed   = sum(1 for ok in results.values() if ok)
-    failed   = [name for name, ok in results.items() if not ok]
+        duration = datetime.now() - start_time
+        total    = len(results)
+        passed   = sum(1 for ok in results.values() if ok)
+        failed   = [name for name, ok in results.items() if not ok]
 
-    minutes, seconds = divmod(int(duration.total_seconds()), 60)
-    duration_str = f"{minutes}m {seconds:02d}s"
+        minutes, seconds = divmod(int(duration.total_seconds()), 60)
+        duration_str = f"{minutes}m {seconds:02d}s"
 
-    if passed == total:
-        overall = f"✅  {passed}/{total} succeeded"
-    elif passed == 0:
-        overall = f"❌  0/{total} succeeded"
-    else:
-        overall = f"⚠️   {passed}/{total} succeeded"
+        overall_ok = passed == total
+        logger.info(
+            "event=sync_run_complete passed=%s total=%s duration=%s failed=%s",
+            passed,
+            total,
+            duration_str,
+            ",".join(failed) if failed else "none",
+        )
+        line()
 
-    print(f"\nSYNC COMPLETE  {overall}  —  Duration: {duration_str}")
-    if failed:
-        print(f"Failed: {', '.join(failed)}")
-    line()
-
-    if passed < total:
-        sys.exit(1)
+        if passed < total:
+            sys.exit(1)
+    finally:
+        end_sync_run(run_token)
