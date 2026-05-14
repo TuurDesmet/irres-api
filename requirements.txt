@@ -1,11 +1,4 @@
-flask
-flask-cors
-requests
-beautifulsoup4
-gunicorn
-flask-limiter
-# ===== Irres-API ======
-
+# IRRES API — pinned for reproducible deploys
 Flask==3.0.0
 flask-cors==4.0.0
 requests==2.31.0
@@ -14,8 +7,4 @@ gunicorn==21.2.0
 python-dotenv==1.0.0
 Flask-Limiter==3.5.0
 
-# ===== SECURITY NOTES =====
-# Always verify dependencies for known vulnerabilities
-# Check for CVEs: pip audit
-# Last updated: 2024-03-12
-# Consider using dependency management tools like pip-tools or poetry
+# Security: pip audit / dependabot on this file
