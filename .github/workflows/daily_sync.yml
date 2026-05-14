@@ -12,18 +12,15 @@ jobs:
       contents: read
 
     # ── timeout-minutes ────────────────────────────────────────────────────────
-    # This is a hard kill switch for the entire job.
-    # If the job is still running after this many minutes, GitHub will cancel it.
+    # Hard cap: GitHub cancels the job after this many minutes.
     #
-    # Why 20 minutes?
-    #   - The /api/listings scrape visits every property detail page one by one.
-    #     With ~15–20 listings, this typically takes 3–8 minutes on Render.com.
-    #   - We set this to 20 minutes to give the scrape comfortable room to finish,
-    #     while still preventing a runaway job from eating all your Action minutes.
-    #   - Increase this number if the job keeps getting killed before finishing.
-    #   - Decrease it if you want faster failure detection (minimum: ~10 minutes).
+    # Why 20?
+    #   - sync_listings() calls /api/listings, which fetches every listing detail
+    #     sequentially; cold Render + many listings can exceed ~10 minutes.
+    #   - 20 minutes leaves headroom while still bounding runaway jobs.
+    #   - Lower this only if you accept occasional cancelled syncs.
     #
-    timeout-minutes: 7
+    timeout-minutes: 20
 
     steps:
       - name: Checkout code
