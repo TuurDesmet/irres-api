@@ -49,7 +49,6 @@ import time
 import json
 import uuid
 import logging
-import unicodedata
 import contextvars
 import sys
 from datetime import datetime, timezone
@@ -229,8 +228,8 @@ limiter = Limiter(
 )
 
 # Exempt low-cost endpoints from rate limiting
-limiter.exempt(lambda: request.endpoint == 'health')
-limiter.exempt(lambda: request.endpoint == 'index')
+limiter.exempt(lambda: request.endpoint == 'health_check')
+limiter.exempt(lambda: request.endpoint == 'root')
 
 
 # =============================================================================
@@ -261,14 +260,14 @@ def require_api_key():
     Authenticate every incoming request using the X-API-KEY header.
 
     Rules:
-      1. Static file endpoints are exempt.
+      1. Static files and GET /health are exempt (uptime monitors; no key in URL).
       2. Any request with ?api_key=... in the query string is rejected (401).
-      3. Missing X-API-KEY header → 401 Unauthorized.
+      3. Missing X-API-KEY header → 401 Unauthorized (except exempt routes above).
       4. Wrong X-API-KEY value   → 401 Unauthorized.
       5. Correct header          → request proceeds normally.
     """
-    # Allow static files through without authentication
-    if request.endpoint == 'static':
+    # Allow static files and health checks through without authentication
+    if request.endpoint in ('static', 'health_check'):
         return
 
     # Explicitly block query-parameter authentication attempts
@@ -448,25 +447,7 @@ class IRRESLocationScraper:
         self.location_groups = {}
 
     # -------------------------------------------------------------------------
-    # BLOCK 6a — IRRESLocationScraper.normalize_text()
-    # -------------------------------------------------------------------------
-
-    @staticmethod
-    def normalize_text(text: str) -> str:
-        """
-        Strip accents and diacritics from a UTF-8 string.
-
-        Uses Unicode NFD decomposition to separate base letters from combining
-        marks, then removes the combining marks (category 'Mn').
-
-        Example: 'Sint-Denijs-Westrem' → 'Sint-Denijs-Westrem' (unchanged)
-                 'Pétegem'             → 'Petegem'
-        """
-        nfd = unicodedata.normalize('NFD', text)
-        return ''.join(c for c in nfd if unicodedata.category(c) != 'Mn')
-
-    # -------------------------------------------------------------------------
-    # BLOCK 6b — IRRESLocationScraper.fetch_page()
+    # BLOCK 6a — IRRESLocationScraper.fetch_page()
     # -------------------------------------------------------------------------
 
     def fetch_page(self) -> str:
@@ -493,7 +474,7 @@ class IRRESLocationScraper:
             raise
 
     # -------------------------------------------------------------------------
-    # BLOCK 6c — IRRESLocationScraper.parse_locations()   ← FIXED
+    # BLOCK 6b — IRRESLocationScraper.parse_locations()   ← FIXED
     # -------------------------------------------------------------------------
 
     def parse_locations(self, html_content: str):
@@ -641,7 +622,7 @@ class IRRESLocationScraper:
         return all_locations, location_groups
 
     # -------------------------------------------------------------------------
-    # BLOCK 6d — IRRESLocationScraper.scrape()
+    # BLOCK 6c — IRRESLocationScraper.scrape()
     # -------------------------------------------------------------------------
 
     def scrape(self) -> dict:
@@ -1792,7 +1773,7 @@ def get_listings():
         )
 
     except Exception as e:
-        logger.exception("event=listings_scrape_failed http_status=200 success_json=false")
+        logger.exception("event=listings_scrape_failed http_status=500 success_json=false")
         payload = {
             "success":  False,
             "error":    str(e),
@@ -1801,7 +1782,7 @@ def get_listings():
         return Response(
             json.dumps(payload, ensure_ascii=False, indent=2),
             mimetype='application/json; charset=utf-8'
-        ), 200
+        ), 500
 
 
 # =============================================================================
@@ -1823,7 +1804,7 @@ def get_locations():
 
     JSON response structure:
         {
-            "status"   : "success",
+            "status"   : "success" | "warning" | "error",
             "timestamp": "<ISO 8601>",
             "data": {
                 "all_locations"  : [{"label": "<str>", "value": "<str>"}, ...],
@@ -1845,6 +1826,19 @@ def get_locations():
     try:
         scraper = IRRESLocationScraper()
         result  = scraper.scrape()
+        inner_status = result.get("status") or "success"
+
+        if inner_status == "error":
+            return jsonify({
+                "status":    "error",
+                "timestamp": datetime.now().isoformat(),
+                "message":   result.get("error") or "Location scrape failed.",
+                "data": {
+                    "all_locations":   result.get("all_locations") or [],
+                    "location_groups": result.get("location_groups") or {},
+                    "count":           0,
+                },
+            }), 502
 
         output_format = request.args.get('format', 'json').lower()
 
@@ -1858,15 +1852,14 @@ def get_locations():
                 headers={"Content-Disposition": "attachment;filename=irres_locations.csv"}
             )
 
-        # Default: JSON
         response_body = {
-            "status":    "success",
+            "status":    inner_status,
             "timestamp": datetime.now().isoformat(),
             "data": {
                 "all_locations":   result['all_locations'],
                 "location_groups": result['location_groups'],
                 "count":           len(result['all_locations']),
-            }
+            },
         }
 
         return jsonify(response_body), 200
