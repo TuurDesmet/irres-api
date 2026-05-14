@@ -739,6 +739,11 @@ def sync_locations():
 # === ENTRY POINT ===
 
 if __name__ == "__main__":
+    if not BOT_ID or not TOKEN:
+        missing = [n for n, v in (("BOT_ID", BOT_ID), ("BOTPRESS_TOKEN", TOKEN)) if not v]
+        logger.error("event=sync_config_error missing=%s", ",".join(missing))
+        sys.exit(2)
+
     start_time = datetime.now()
     run_token = begin_sync_run()
 
