@@ -52,7 +52,7 @@ The repository includes a GitHub Actions workflow (`daily_sync.yml`) that runs d
 - Runs on a schedule (daily at midnight).
 - Uses Python 3.10.
 - Passes `BOT_ID` and `BOTPRESS_TOKEN` as environment variables.
-- Has a timeout of 7 minutes.
+- Has a job timeout of 20 minutes (see `daily_sync.yml`).
 
 ### Workflow File
 
@@ -68,6 +68,7 @@ Ensure the following secrets are set in your GitHub repository:
 
 - `BOT_ID`: Your Botpress bot ID.
 - `BOTPRESS_TOKEN`: Your Botpress API token.
+- `IRRES_API_KEY`: Same value as the deployed API’s `API_KEY` (sent as `X-API-KEY`).
 
 ## Render Deployment
 
